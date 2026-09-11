@@ -83,7 +83,7 @@ def compare_scan_times():
     prop_less_1mo = number_less_1mo / len(subjects)
     
     print(f"Median minimum time difference between MRIs and PET scans for both amyloid and tau pet: {median_min_time_diff}")
-    print(f"Proportion of min time diffs | 0 days: {prop_0} | <= 1 wk: {prop_less_1wk} | <= 1mo: {prop_less_1mo}")
+    print(f"Proportion of min time diffs | 0 days: {prop_0:.4f} | <= 1 wk: {prop_less_1wk:.4f} | <= 1mo: {prop_less_1mo:.4f}")
     
     
     

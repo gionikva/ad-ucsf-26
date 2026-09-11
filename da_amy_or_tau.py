@@ -75,13 +75,13 @@ def compare_scan_times():
         prop_less_1mo = number_less_1mo / len(subjects)
         
         print(f"Median minimum time difference between MRIs and PET scans ({pet_type}): {median_min_time_diff}")
-        print(f"Proportion of min time diffs | 0 days: {prop_0} | <= 1 wk: {prop_less_1wk} | <= 1mo: {prop_less_1mo}")
+        print(f"Proportion of min time diffs | 0 days: {prop_0:.4f} | <= 1 wk: {prop_less_1wk:.4f} | <= 1mo: {prop_less_1mo:.4f}")
     
     
     calc_data_availability(mris.copy(), pets.copy(), "amyloid_pet")
     calc_data_availability(mris, pets, "tau_pet")
     
-    print(len(mris), len(pets))
+    # print(len(mris), len(pets))
     
 
 def main():
