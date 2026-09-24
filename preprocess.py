@@ -5,6 +5,7 @@ import torch
 from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
+from tqdm import tqdm
 import itk
 import monai
 from monai.transforms import (
@@ -99,23 +100,13 @@ def preprocess_adni_pipeline(
 ):
     """
     Full pipeline:
-    DCM -> N4 Bias Correction -> Skull Stripping -> 1mm Resampling (RAS) -> Z-Score Normalization -> NIfTI
+    DCM -> N4 Bias Correction -> Skull Stripping -> 1mm Resampling (RAS) -> Intensity Percentile Clip -> Z-Score Normalization -> NIfTI
     """
-    print(f"[1/5] Loading DICOM series from {dicom_dir}...")
     sitk_img = dcm_series_to_sitk(dicom_dir)
-
-    print("[2/5] Running N4 Bias Field Correction...")
     n4_corrected, initial_mask = apply_n4_bias_field_correction(sitk_img)
-
-    print("[3/5] Performing skull stripping & mask refinement...")
     brain_extracted = skull_strip(n4_corrected, initial_mask)
-
-
     tensor = sitk_to_metatensor(brain_extracted)
 
-    print("[4/5] Standardizing orientation, spacing, and intensity via Monai...")
-
-    # Post-processing transforms
     normalize = Compose(
         [
             Spacing(pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
@@ -126,11 +117,8 @@ def preprocess_adni_pipeline(
         ]
     )
     
-    
-
     normalized = normalize(tensor)
 
-    print(f"[5/5] Saving preprocessed NIfTI to {out_dir}...")
     writer = NibabelWriter()
 
     img = normalized.squeeze(0) if normalized.ndim == 4 else normalized
@@ -138,10 +126,6 @@ def preprocess_adni_pipeline(
     writer.set_data_array(img, channel_dim=None)
     writer.set_metadata({"affine": img.affine})
     writer.write(os.path.join(out_dir, f"{image_id}.nii.gz"))
-   
-    # Path(out_dir).parent.mkdir(parents=True, exist_ok=True)
-    # processed_subject.mri.save(out_dir)
-    # print("Done!")
 
 
 def list_usable_dcm_dirs(
@@ -199,7 +183,7 @@ def main():
 
     root = "./data/images"
 
-    for series in usable_dirs:
+    for series in tqdm(usable_dirs):
         path = series["path"]
         subject = series["subject_id"]
         image_id = series["image_id"]
