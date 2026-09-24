@@ -5,16 +5,18 @@ import torch
 from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
+import itk
 import monai
 from monai.transforms import (
     Compose,
     Spacing,
-    Orientation
-)
-from monai.data.image_reader import ITKReader
-
+    Orientation,
+    ScaleIntensity,
+    NormalizeIntensity)
+from monai.data import NibabelWriter
 import nibabel as nib
 import pandas as pd
+
 
 def dcm_series_to_sitk(dicom_dir: str) -> sitk.Image:
     """
@@ -25,7 +27,7 @@ def dcm_series_to_sitk(dicom_dir: str) -> sitk.Image:
     series_ids = reader.GetGDCMSeriesIDs(dicom_dir)
     if not series_ids:
         raise FileNotFoundError(f"No valid DICOM series found in: {dicom_dir}")
-    
+
     # Load the first series found in the directory
     dicom_names = reader.GetGDCMSeriesFileNames(dicom_dir, series_ids[0])
     reader.SetFileNames(dicom_names)
@@ -40,7 +42,7 @@ def apply_n4_bias_field_correction(image: sitk.Image) -> tuple[sitk.Image, sitk.
     """
     # Generate initial foreground mask to guide N4
     mask = sitk.OtsuThreshold(image, 0, 1, 200)
-    
+
     # Optional: shrink image for faster spline computation
     shrink_factor = [2, 2, 2]
     shrunk_image = sitk.Shrink(image, shrink_factor)
@@ -51,11 +53,11 @@ def apply_n4_bias_field_correction(image: sitk.Image) -> tuple[sitk.Image, sitk.
     corrector.SetConvergenceThreshold(0.001)
 
     _ = corrector.Execute(shrunk_image, shrunk_mask)
-    
+
     # Evaluate full-resolution bias field
     log_bias_field = corrector.GetLogBiasFieldAsImage(image)
     corrected_image = image / sitk.Exp(log_bias_field)
-    
+
     return corrected_image, mask
 
 
@@ -66,27 +68,34 @@ def skull_strip(image: sitk.Image, mask: sitk.Image) -> sitk.Image:
     # Morphological opening and largest connected component to isolate cerebrum/cerebellum
     cleaned_mask = sitk.BinaryMorphologicalOpening(mask, (3, 3, 3))
     cleaned_mask = sitk.RelabelComponent(sitk.ConnectedComponent(cleaned_mask)) == 1
-    
+
     # Zero-out voxels outside the mask
     masked_image = sitk.Mask(image, cleaned_mask, maskingValue=0.0)
     return masked_image
 
 
-def sitk_to_metatensor(sitk_image: sitk.Image, reader: ITKReader) -> tio.Subject:
+def sitk_to_metatensor(image: sitk.Image) -> tio.Subject:
     """
     Converts a SimpleITK image to a Monai metatensor for transforms.
     """
-    itk = sitk.Cast(sitk_iamge)
-    data, meta = reader.get_data(itk)
-    return MetaTensor(data, affine=meta.get("affine"), meta=meta)
-    monai_img = reader.create_sub_result(data, meta)
-    
+    # 1. SimpleITK array is (Z, Y, X) -> transpose to (X, Y, Z) and add channel -> (1, X, Y, Z)
+    data = sitk.GetArrayFromImage(image).transpose(2, 1, 0)
+    tensor = torch.from_numpy(data).unsqueeze(0)
+
+    # 2. Build 4x4 Affine matrix
+    spacing = np.array(image.GetSpacing())
+    origin = np.array(image.GetOrigin())
+    direction = np.array(image.GetDirection()).reshape(3, 3)
+
+    affine = np.eye(4, dtype=np.float32)
+    affine[:3, :3] = direction * spacing
+    affine[:3, 3] = origin
+
+    return MetaTensor(tensor, affine=torch.from_numpy(affine))
 
 
 def preprocess_adni_pipeline(
-    dicom_dir: str, 
-    output_nifti_path: str, 
-    target_spacing: tuple = (1.0, 1.0, 1.0)
+    dicom_dir: str, out_dir: str, image_id: str, target_spacing: tuple = (1.0, 1.0, 1.0)
 ):
     """
     Full pipeline:
@@ -101,41 +110,54 @@ def preprocess_adni_pipeline(
     print("[3/5] Performing skull stripping & mask refinement...")
     brain_extracted = skull_strip(n4_corrected, initial_mask)
 
-    print("[4/5] Standardizing orientation, spacing, and intensity via TorchIO...")
-    subject = sitk_to_torchio_subject(brain_extracted)
+
+    tensor = sitk_to_metatensor(brain_extracted)
+
+    print("[4/5] Standardizing orientation, spacing, and intensity via Monai...")
 
     # Post-processing transforms
-    transforms = Compose([
-            Spacing(
-                pixdim=(1.0, 1.0, 1.0),
-                mode="bilinear"
-            ),
+    normalize = Compose(
+        [
+            Spacing(pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
             Orientation(axcodes="RAS"),
-    ])
+            ScaleIntensity(minv=0.01,
+                           maxv=0.99),
+            NormalizeIntensity(),
+        ]
+    )
     
-    processed_subject = transforms(subject)
+    
 
-    print(f"[5/5] Saving preprocessed NIfTI to {output_nifti_path}...")
-    Path(output_nifti_path).parent.mkdir(parents=True, exist_ok=True)
-    processed_subject.mri.save(output_nifti_path)
-    print("Done!")
+    normalized = normalize(tensor)
+
+    print(f"[5/5] Saving preprocessed NIfTI to {out_dir}...")
+    writer = NibabelWriter()
+
+    img = normalized.squeeze(0) if normalized.ndim == 4 else normalized
     
+    writer.set_data_array(img, channel_dim=None)
+    writer.set_metadata({"affine": img.affine})
+    writer.write(os.path.join(out_dir, f"{image_id}.nii.gz"))
+   
+    # Path(out_dir).parent.mkdir(parents=True, exist_ok=True)
+    # processed_subject.mri.save(out_dir)
+    # print("Done!")
+
+
 def list_usable_dcm_dirs(
     adni_root: str, mriqc_csv: str, min_slices: int = 100
 ) -> pd.DataFrame:
     adni_path = Path(adni_root)
 
-
     df_qc = pd.read_csv(mriqc_csv, low_memory=False)
 
     # Only want images with T1-weighted 3D scans
-    passed_df = df_qc[(df_qc["SeriesType"] == "T1w") & (df_qc["AcquisitionType"] == "3D")]
+    passed_df = df_qc[
+        (df_qc["SeriesType"] == "T1w") & (df_qc["AcquisitionType"] == "3D")
+    ]
 
-   
     id_col = "image_id"
-    approved_ids = set(
-        passed_df[id_col].dropna().astype(str)
-    )
+    approved_ids = set(passed_df[id_col].dropna().astype(str))
 
     usable = []
     for root, _, files in os.walk(adni_path):
@@ -163,42 +185,36 @@ def list_usable_dcm_dirs(
 def main():
     adni_raw = "./data/raw/ADNI"
     qc_file = "./data/raw/MRIQC.csv"  # Set to None if you don't have it downloaded yet
-    
+
     usable_dirs = list_usable_dcm_dirs(
         adni_root=adni_raw,
         mriqc_csv=qc_file,
-        min_slices=100  # Full 3D T1 acquisitions typically have 160-220 slices
+        min_slices=100,  # Full 3D T1 acquisitions typically have 160-220 slices
     )
-    
+
     # Export to DataFrame for processing pipelines
     df_usable = pd.DataFrame(usable_dirs)
     print(f"\nFound {len(df_usable)} usable scan series.")
     print(df_usable[["subject_id", "image_id", "path"]].head())
-    
-    
-    root = "./data/images"
-    
-    for series in usable_dirs[:3]:
-        path = series['path']
-        subject = series['subject_id']
-        image = series['image_id']
-        
-        out_path = os.path.join(root, subject, image)
-        
-        os.makedirs(out_path, exist_ok=True)
-        
-        preprocess_adni_pipeline(path, out_path)
-    
-    
 
+    root = "./data/images"
+
+    for series in usable_dirs:
+        path = series["path"]
+        subject = series["subject_id"]
+        image_id = series["image_id"]
+
+        out_dir = os.path.join(root, subject)
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        preprocess_adni_pipeline(path, out_dir, image_id)
 
     # input_dcm_folder = "path/to/ADNI/002_S_0295/MPRAGE/2006-04-18_.../S13408"
     # output_nii = "path/to/ADNI_clean/002_S_0295_MPRAGE_preprocessed.nii.gz"
     # preprocess_adni_pipeline(input_dcm_folder, output_nii)
     #
 
+
 if __name__ == "__main__":
     main()
-    
-    
-    
