@@ -33,6 +33,9 @@ def compare_scan_times():
     pets = pd.read_csv("./data/tables/All_Subjects_Key_PET_10Sep2026.csv")
     
   
+    total_subjects = len(mris["subject_id"].unique())
+
+  
     mris, pets, subjects = preprocess(mris, pets)
     # print(pets["amyloid_pet"][:20])
     
@@ -78,9 +81,9 @@ def compare_scan_times():
     
     median_min_time_diff = np.median(mins) / np.timedelta64(1, 'D')
     
-    prop_0 = number_of_0s / len(subjects)
-    prop_less_1wk = number_less_1wk / len(subjects)
-    prop_less_1mo = number_less_1mo / len(subjects)
+    prop_0 = number_of_0s / total_subjects
+    prop_less_1wk = number_less_1wk / total_subjects
+    prop_less_1mo = number_less_1mo / total_subjects
     
     print(f"Median minimum time difference between MRIs and PET scans for both amyloid and tau pet: {median_min_time_diff}")
     print(f"Proportion of min time diffs | 0 days: {prop_0:.4f} | <= 1 wk: {prop_less_1wk:.4f} | <= 1mo: {prop_less_1mo:.4f}")

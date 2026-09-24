@@ -1,0 +1,204 @@
+import os
+from os import listdir
+from monai.data.meta_tensor import MetaTensor
+import torch
+from pathlib import Path
+import numpy as np
+import SimpleITK as sitk
+import monai
+from monai.transforms import (
+    Compose,
+    Spacing,
+    Orientation
+)
+from monai.data.image_reader import ITKReader
+
+import nibabel as nib
+import pandas as pd
+
+def dcm_series_to_sitk(dicom_dir: str) -> sitk.Image:
+    """
+    Reads a directory of 2D .dcm slices and stacks them into a 3D SimpleITK Image,
+    preserving coordinate spaces, origin, spacing, and directions.
+    """
+    reader = sitk.ImageSeriesReader()
+    series_ids = reader.GetGDCMSeriesIDs(dicom_dir)
+    if not series_ids:
+        raise FileNotFoundError(f"No valid DICOM series found in: {dicom_dir}")
+    
+    # Load the first series found in the directory
+    dicom_names = reader.GetGDCMSeriesFileNames(dicom_dir, series_ids[0])
+    reader.SetFileNames(dicom_names)
+    image = reader.Execute()
+    return sitk.Cast(image, sitk.sitkFloat32)
+
+
+def apply_n4_bias_field_correction(image: sitk.Image) -> tuple[sitk.Image, sitk.Image]:
+    """
+    Computes an Otsu background mask and corrects RF inhomogeneity.
+    Returns: (corrected_image, brain_mask)
+    """
+    # Generate initial foreground mask to guide N4
+    mask = sitk.OtsuThreshold(image, 0, 1, 200)
+    
+    # Optional: shrink image for faster spline computation
+    shrink_factor = [2, 2, 2]
+    shrunk_image = sitk.Shrink(image, shrink_factor)
+    shrunk_mask = sitk.Shrink(mask, shrink_factor)
+
+    corrector = sitk.N4BiasFieldCorrectionImageFilter()
+    corrector.SetMaximumNumberOfIterations([50, 50, 30, 20])
+    corrector.SetConvergenceThreshold(0.001)
+
+    _ = corrector.Execute(shrunk_image, shrunk_mask)
+    
+    # Evaluate full-resolution bias field
+    log_bias_field = corrector.GetLogBiasFieldAsImage(image)
+    corrected_image = image / sitk.Exp(log_bias_field)
+    
+    return corrected_image, mask
+
+
+def skull_strip(image: sitk.Image, mask: sitk.Image) -> sitk.Image:
+    """
+    Applies the binary mask to zero out background/skull non-brain voxels.
+    """
+    # Morphological opening and largest connected component to isolate cerebrum/cerebellum
+    cleaned_mask = sitk.BinaryMorphologicalOpening(mask, (3, 3, 3))
+    cleaned_mask = sitk.RelabelComponent(sitk.ConnectedComponent(cleaned_mask)) == 1
+    
+    # Zero-out voxels outside the mask
+    masked_image = sitk.Mask(image, cleaned_mask, maskingValue=0.0)
+    return masked_image
+
+
+def sitk_to_metatensor(sitk_image: sitk.Image, reader: ITKReader) -> tio.Subject:
+    """
+    Converts a SimpleITK image to a Monai metatensor for transforms.
+    """
+    itk = sitk.Cast(sitk_iamge)
+    data, meta = reader.get_data(itk)
+    return MetaTensor(data, affine=meta.get("affine"), meta=meta)
+    monai_img = reader.create_sub_result(data, meta)
+    
+
+
+def preprocess_adni_pipeline(
+    dicom_dir: str, 
+    output_nifti_path: str, 
+    target_spacing: tuple = (1.0, 1.0, 1.0)
+):
+    """
+    Full pipeline:
+    DCM -> N4 Bias Correction -> Skull Stripping -> 1mm Resampling (RAS) -> Z-Score Normalization -> NIfTI
+    """
+    print(f"[1/5] Loading DICOM series from {dicom_dir}...")
+    sitk_img = dcm_series_to_sitk(dicom_dir)
+
+    print("[2/5] Running N4 Bias Field Correction...")
+    n4_corrected, initial_mask = apply_n4_bias_field_correction(sitk_img)
+
+    print("[3/5] Performing skull stripping & mask refinement...")
+    brain_extracted = skull_strip(n4_corrected, initial_mask)
+
+    print("[4/5] Standardizing orientation, spacing, and intensity via TorchIO...")
+    subject = sitk_to_torchio_subject(brain_extracted)
+
+    # Post-processing transforms
+    transforms = Compose([
+            Spacing(
+                pixdim=(1.0, 1.0, 1.0),
+                mode="bilinear"
+            ),
+            Orientation(axcodes="RAS"),
+    ])
+    
+    processed_subject = transforms(subject)
+
+    print(f"[5/5] Saving preprocessed NIfTI to {output_nifti_path}...")
+    Path(output_nifti_path).parent.mkdir(parents=True, exist_ok=True)
+    processed_subject.mri.save(output_nifti_path)
+    print("Done!")
+    
+def list_usable_dcm_dirs(
+    adni_root: str, mriqc_csv: str, min_slices: int = 100
+) -> pd.DataFrame:
+    adni_path = Path(adni_root)
+
+
+    df_qc = pd.read_csv(mriqc_csv, low_memory=False)
+
+    # Only want images with T1-weighted 3D scans
+    passed_df = df_qc[(df_qc["SeriesType"] == "T1w") & (df_qc["AcquisitionType"] == "3D")]
+
+   
+    id_col = "image_id"
+    approved_ids = set(
+        passed_df[id_col].dropna().astype(str)
+    )
+
+    usable = []
+    for root, _, files in os.walk(adni_path):
+        dcm_count = sum(1 for f in files if f.lower().endswith(".dcm"))
+        if dcm_count < min_slices:
+            continue
+
+        folder = Path(root)
+        numeric_id = folder.name.lstrip("I")
+
+        if numeric_id in approved_ids:
+            usable.append(
+                {
+                    "subject_id": folder.parents[2].name,
+                    "sequence": folder.parents[1].name,
+                    "image_id": numeric_id,
+                    "n_slices": dcm_count,
+                    "path": str(folder.resolve()),
+                }
+            )
+
+    return usable
+
+
+def main():
+    adni_raw = "./data/raw/ADNI"
+    qc_file = "./data/raw/MRIQC.csv"  # Set to None if you don't have it downloaded yet
+    
+    usable_dirs = list_usable_dcm_dirs(
+        adni_root=adni_raw,
+        mriqc_csv=qc_file,
+        min_slices=100  # Full 3D T1 acquisitions typically have 160-220 slices
+    )
+    
+    # Export to DataFrame for processing pipelines
+    df_usable = pd.DataFrame(usable_dirs)
+    print(f"\nFound {len(df_usable)} usable scan series.")
+    print(df_usable[["subject_id", "image_id", "path"]].head())
+    
+    
+    root = "./data/images"
+    
+    for series in usable_dirs[:3]:
+        path = series['path']
+        subject = series['subject_id']
+        image = series['image_id']
+        
+        out_path = os.path.join(root, subject, image)
+        
+        os.makedirs(out_path, exist_ok=True)
+        
+        preprocess_adni_pipeline(path, out_path)
+    
+    
+
+
+    # input_dcm_folder = "path/to/ADNI/002_S_0295/MPRAGE/2006-04-18_.../S13408"
+    # output_nii = "path/to/ADNI_clean/002_S_0295_MPRAGE_preprocessed.nii.gz"
+    # preprocess_adni_pipeline(input_dcm_folder, output_nii)
+    #
+
+if __name__ == "__main__":
+    main()
+    
+    
+    
