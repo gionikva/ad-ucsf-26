@@ -198,11 +198,13 @@ def preprocess_adni_pipeline(
     
     os.remove(os.path.join(out_dir, "temp.nii.gz"))
     
-    # Remove extra files
-
-
-    # Standardizes image size
-
+    # Remove unneeded files
+    needed_files = ["img_seg.nii.gz", "img.nii.gz"]
+    
+    for file in os.listdir(out_dir):
+        path = os.path.join(out_dir, file)
+        if file not in needed_files:
+            os.remove(path)
 
 def list_usable_dcm_dirs(
     adni_root: str, mriqc_csv: str, min_slices: int = 20
