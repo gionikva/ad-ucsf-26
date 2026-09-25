@@ -1,6 +1,9 @@
 import os
 from os import listdir
+from typing import Any
+from pandas.core.frame import DataFrame
 import subprocess
+from argparse import ArgumentParser
 from monai.data.meta_tensor import MetaTensor
 import torch
 from pathlib import Path
@@ -23,7 +26,8 @@ from monai.transforms import (
 from monai.data import NibabelWriter
 import nibabel as nib
 import pandas as pd
-
+from utils.shared import get_image_dirs
+import random
 
 def dcm_series_to_sitk(dicom_dir: str) -> sitk.Image:
     """
@@ -131,6 +135,18 @@ def run_fsl_fast(input_dir: str):
         raise RuntimeError(f"FAST failed:\n{result.stderr}")
 
 
+def delete_extra_files(dir: str):
+    """
+    Deletes unneeded extra files in the directory to save space.
+    """
+    needed_files = ["img_seg.nii.gz", "img.nii.gz"]
+    
+    for file in os.scandir(dir):
+        path = file.path
+        if file.name not in needed_files:
+            os.remove(path)
+    
+
 def preprocess_adni_pipeline(
     dicom_dir: str, out_dir: str, target_spacing: tuple = (1.0, 1.0, 1.0)
 ):
@@ -198,13 +214,9 @@ def preprocess_adni_pipeline(
     
     os.remove(os.path.join(out_dir, "temp.nii.gz"))
     
+    delete_extra_files(out_dir)
     # Remove unneeded files
-    needed_files = ["img_seg.nii.gz", "img.nii.gz"]
     
-    for file in os.listdir(out_dir):
-        path = os.path.join(out_dir, file)
-        if file not in needed_files:
-            os.remove(path)
 
 def list_usable_dcm_dirs(
     adni_root: str, mriqc_csv: str, min_slices: int = 20
@@ -223,6 +235,7 @@ def list_usable_dcm_dirs(
 
     usable = []
     for root, _, files in os.walk(adni_path):
+        
         dcm_count = sum(1 for f in files if f.lower().endswith(".dcm"))
         if dcm_count < min_slices:
             continue
@@ -245,32 +258,74 @@ def list_usable_dcm_dirs(
 
 
 def main():
-    adni_raw = "./data/raw/ADNI"
-    qc_file = "./data/tables/MRIQC.csv"  # Set to None if you don't have it downloaded yet
+    parser = ArgumentParser()
+    
+    parser.add_argument("-i", "--input-dir", type=str, default="./data/raw/ADNI")
+    parser.add_argument("-o", "--output-dir", type=str, default="./data/images")
+    parser.add_argument("-q", "--qc", type=str, default="./data/tables/MRIQC.csv")
+    parser.add_argument("-n", "--max-images", type=int, required=False, default=None)
+    parser.add_argument("-s", "--seed", type=int, default=42)
+    # Whether to resume from when the script crashed/terminated
+    # Assumes that -n and -s parameters stay the same between runs
+    parser.add_argument("-r", "--resume", type=bool, default=False) 
+    
+    args = parser.parse_args()
+    
+    seed = args.seed
+    adni_root = args.input_dir
+    out_dir = args.output_dir
+    qc_file = args.qc 
+    max_images = args.max_images
+    resume = args.resume
 
     usable_dirs = list_usable_dcm_dirs(
-        adni_root=adni_raw,
+        adni_root=adni_root,
         mriqc_csv=qc_file,
         min_slices=20,  # Full 3D T1 acquisitions typically have 160-220 slices
     )
 
     # Export to DataFrame for processing pipelines
-    df_usable = pd.DataFrame(usable_dirs)
-    print(f"\nFound {len(df_usable)} usable scan series.")
-    print(df_usable[["subject_id", "image_id", "path"]].head())
+ 
+    print(f"\nFound {len(usable_dirs)} usable scan series.")
 
-    root = "./data/images"
+    raw_images: DataFrame = pd.DataFrame(usable_dirs)
+    # Shuffle and retain a maximum of max_images images
+    raw_images = raw_images.sample(frac=1, random_state=seed).head(max_images)
+      
+    processed_images = set()
 
-    for series in tqdm(usable_dirs):
-        path = series["path"]
-        subject = series["subject_id"]
-        image_id = series["image_id"]
+    if resume:
+        for subject in os.scandir(out_dir):
+            for image in os.scandir(subject.path):
+                files = os.listdir(image.path)
+                if "img.nii.gz" in files and "img_seg.nii.gz" in files:
+                    processed_images.add(image.name)
+                if len(files) > 2:
+                    remove_extra_files(image.path)
+    
+    last_index = -1
+    
+    for i, entry in raw_images.iterrows():
+        image_id = entry["image_id"]
+        if image_id in processed_images:
+            last_index = i
+    
+    raw_images = raw_images.iloc[last_index+1:]
+    
+    print(len(raw_images))
 
-        out_dir = os.path.join(root, subject, image_id)
+    for _, row in tqdm(raw_images.iterrows(), position = last_index + 1, leave=True, total=len(raw_images)):
+        path = row["path"]
+        subject = row["subject_id"]
+        image_id = row["image_id"]
 
-        os.makedirs(out_dir, exist_ok=True)
+        img_out_dir = os.path.join(out_dir, subject, image_id)
 
-        preprocess_adni_pipeline(path, out_dir)
+        print(out_dir)
+
+        os.makedirs(img_out_dir, exist_ok=True)
+
+        preprocess_adni_pipeline(path, img_out_dir)
 
     # input_dcm_folder = "path/to/ADNI/002_S_0295/MPRAGE/2006-04-18_.../S13408"
     # output_nii = "path/to/ADNI_clean/002_S_0295_MPRAGE_preprocessed.nii.gz"
