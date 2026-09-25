@@ -1,5 +1,6 @@
 import os
 from os import listdir
+import subprocess
 from monai.data.meta_tensor import MetaTensor
 import torch
 from pathlib import Path
@@ -12,8 +13,13 @@ from monai.transforms import (
     Compose,
     Spacing,
     Orientation,
-    ScaleIntensity,
-    NormalizeIntensity)
+    ScaleIntensityRange,
+    NormalizeIntensityd,
+    CropForeground,
+    LoadImaged,
+    ResizeWithPadOrCropd,
+    EnsureChannelFirstd,
+)
 from monai.data import NibabelWriter
 import nibabel as nib
 import pandas as pd
@@ -75,7 +81,7 @@ def skull_strip(image: sitk.Image, mask: sitk.Image) -> sitk.Image:
     return masked_image
 
 
-def sitk_to_metatensor(image: sitk.Image) -> tio.Subject:
+def sitk_to_metatensor(image: sitk.Image) -> MetaTensor:
     """
     Converts a SimpleITK image to a Monai metatensor for transforms.
     """
@@ -95,8 +101,38 @@ def sitk_to_metatensor(image: sitk.Image) -> tio.Subject:
     return MetaTensor(tensor, affine=torch.from_numpy(affine))
 
 
+def percentile_clip(metatensor: MetaTensor):
+    """
+    Clips the tensor to the 1st and 99th percentile values to reduce noise.
+    """
+    array = metatensor.array
+    lower = np.percentile(array, 1)
+    upper = np.percentile(array, 99)
+    metatensor.array = np.clip(array, lower, upper)
+    return metatensor
+
+
+def run_fsl_fast(input_dir: str):
+    """Uses FSL-fast to segment brain into GM, WM, CSF."""
+    cmd = [
+        "fast",
+        "-t",
+        "1",  # T1-weighted
+        "-n",
+        "3",
+        "-N",
+        "-o",
+        os.path.join(input_dir, "img"),
+        os.path.join(input_dir, "temp.nii.gz")
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FAST failed:\n{result.stderr}")
+
+
 def preprocess_adni_pipeline(
-    dicom_dir: str, out_dir: str, image_id: str, target_spacing: tuple = (1.0, 1.0, 1.0)
+    dicom_dir: str, out_dir: str, target_spacing: tuple = (1.0, 1.0, 1.0)
 ):
     """
     Full pipeline:
@@ -106,30 +142,70 @@ def preprocess_adni_pipeline(
     n4_corrected, initial_mask = apply_n4_bias_field_correction(sitk_img)
     brain_extracted = skull_strip(n4_corrected, initial_mask)
     tensor = sitk_to_metatensor(brain_extracted)
+    tensor = percentile_clip(tensor)
 
-    normalize = Compose(
+    pre_fast = Compose(
         [
+            CropForeground(),
             Spacing(pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
             Orientation(axcodes="RAS"),
-            ScaleIntensity(minv=0.01,
-                           maxv=0.99),
-            NormalizeIntensity(),
         ]
     )
-    
-    normalized = normalize(tensor)
 
+    normalized = pre_fast(tensor)
     writer = NibabelWriter()
+    img = normalized.squeeze(0) if normalized.ndim == 4 else normalized
 
+    temp_path = os.path.join(out_dir, f"temp.nii.gz")
+
+    writer.set_data_array(img, channel_dim=None)
+    writer.set_metadata({"affine": img.affine})
+    writer.write(os.path.join(out_dir, f"temp.nii.gz"))
+
+    run_fsl_fast(out_dir)
+    
+    
+    img_path = os.path.join(out_dir, f"img.nii.gz")
+    seg_path = os.path.join(out_dir, f"img_seg.nii.gz")
+
+    dct = {"image": temp_path, "label": seg_path}
+
+    final_transforms = Compose(
+        [
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            NormalizeIntensityd(keys=["image"]),  # Z-score normalization
+            ResizeWithPadOrCropd(
+                keys=["image", "label"],
+                spatial_size=(256, 256, 256),
+            ),
+        ]
+    )
+
+    out = final_transforms(dct)
+    img = out["image"].squeeze(0)
+    seg = out["label"].squeeze(0)
+    
     img = normalized.squeeze(0) if normalized.ndim == 4 else normalized
     
     writer.set_data_array(img, channel_dim=None)
     writer.set_metadata({"affine": img.affine})
-    writer.write(os.path.join(out_dir, f"{image_id}.nii.gz"))
+    writer.write(img_path)
+    
+    writer.set_data_array(seg, channel_dim=None)
+    writer.set_metadata({"affine": seg.affine})
+    writer.write(seg_path)
+    
+    os.remove(os.path.join(out_dir, "temp.nii.gz"))
+    
+    # Remove extra files
+
+
+    # Standardizes image size
 
 
 def list_usable_dcm_dirs(
-    adni_root: str, mriqc_csv: str, min_slices: int = 100
+    adni_root: str, mriqc_csv: str, min_slices: int = 20
 ) -> pd.DataFrame:
     adni_path = Path(adni_root)
 
@@ -173,7 +249,7 @@ def main():
     usable_dirs = list_usable_dcm_dirs(
         adni_root=adni_raw,
         mriqc_csv=qc_file,
-        min_slices=100,  # Full 3D T1 acquisitions typically have 160-220 slices
+        min_slices=20,  # Full 3D T1 acquisitions typically have 160-220 slices
     )
 
     # Export to DataFrame for processing pipelines
@@ -188,11 +264,11 @@ def main():
         subject = series["subject_id"]
         image_id = series["image_id"]
 
-        out_dir = os.path.join(root, subject)
+        out_dir = os.path.join(root, subject, image_id)
 
         os.makedirs(out_dir, exist_ok=True)
 
-        preprocess_adni_pipeline(path, out_dir, image_id)
+        preprocess_adni_pipeline(path, out_dir)
 
     # input_dcm_folder = "path/to/ADNI/002_S_0295/MPRAGE/2006-04-18_.../S13408"
     # output_nii = "path/to/ADNI_clean/002_S_0295_MPRAGE_preprocessed.nii.gz"
