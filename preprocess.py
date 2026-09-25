@@ -246,7 +246,7 @@ def list_usable_dcm_dirs(
 
 def main():
     adni_raw = "./data/raw/ADNI"
-    qc_file = "./data/raw/MRIQC.csv"  # Set to None if you don't have it downloaded yet
+    qc_file = "./data/tables/MRIQC.csv"  # Set to None if you don't have it downloaded yet
 
     usable_dirs = list_usable_dcm_dirs(
         adni_root=adni_raw,
