@@ -6,7 +6,7 @@ from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models.models import LightMedSeg
+from models.lightmedseg import LightMedSeg
 
 
 class LightMedSegLoss(nn.Module):

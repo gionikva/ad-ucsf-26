@@ -1,17 +1,11 @@
 import os
 import torch
 import argparse
-from models.models import LightMedSeg, LMSBR
-from utils.dataset import ISLESDataset
+from models.lightmedseg import LightMedSeg
+from utils.dataset import ADNISegDataset
 from utils.loss import LightMedSegLoss
 from torch.utils.data import DataLoader, random_split
 import torch.optim as optim
-from pathlib import Path
-from torch.amp import autocast, GradScaler
-from tqdm import tqdm
-
-# from test_model import visualize_prediction
-
 from tqdm import tqdm
 
 
@@ -171,16 +165,15 @@ def train_model(
                 metadata = batch["metadata"].to(device)
                 targets = batch["mask"].to(device)
 
-                with autocast(device_type=device, dtype=torch.float32):
-                    _, (loss, l_dice, l_ce, l_bdry) = get_losses(
-                        model,
-                        images,
-                        metadata,
-                        targets,
-                        criterion,
-                        model_type,
-                        deep_supervision,
-                    )
+                _, (loss, l_dice, l_ce, l_bdry) = get_losses(
+                    model,
+                    images,
+                    metadata,
+                    targets,
+                    criterion,
+                    model_type,
+                    deep_supervision,
+                )
 
                 val_loss += loss.item()
                 val_dice += l_dice.item()

@@ -3,13 +3,12 @@ from torch.nn import Module
 import torch.nn as nn
 import torch.nn.functional as F
 from models.lspm import LSPM
-from models.common import (
+from models.modules import (
     GhostConv3D,
     GlobalAnchorDetector,
     Encoder,
     MultiScaleSkipFusion,
     Decoder,
-    BoundaryRefinement,
 )
 
 class LightMedSeg(Module):
