@@ -291,6 +291,8 @@ def main():
     raw_images: DataFrame = pd.DataFrame(usable_dirs)
     # Shuffle and retain a maximum of max_images images
     raw_images = raw_images.sample(frac=1, random_state=seed).head(max_images)
+    
+    total_images = len(raw_images)
       
     processed_images = set()
 
@@ -314,14 +316,14 @@ def main():
     
     print(len(raw_images))
 
-    for _, row in tqdm(raw_images.iterrows(), position = last_index + 1, leave=True, total=len(raw_images)):
+    for _, row in tqdm(raw_images.iterrows(), initial = last_index + 1, leave=True, total=total_images):
         path = row["path"]
         subject = row["subject_id"]
         image_id = row["image_id"]
 
         img_out_dir = os.path.join(out_dir, subject, image_id)
 
-        print(out_dir)
+        # print(out_dir)
 
         os.makedirs(img_out_dir, exist_ok=True)
 
