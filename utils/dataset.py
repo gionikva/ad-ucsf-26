@@ -6,16 +6,10 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset
 import nibabel as nib
-from monai.data import PersistentDataset
 from monai.transforms import (
     LoadImaged,
     Compose,
-    EnsureTyped,
     EnsureChannelFirstd,
-    ResizeWithPadOrCropd,
-    Lambdad,
-    RandCropByPosNegLabeld,
-    MapTransform,
     RandFlipd,
     RandRotated,
     RandGaussianNoised,
@@ -23,78 +17,85 @@ from monai.transforms import (
     RandShiftIntensityd,
     RandBiasFieldd,
     Rand3DElasticd,
-    Spacingd,
-    CropForegroundd,
-    SpatialPadd,
-    Orientationd,
 )
-from utils.shared import get_dataset_filepaths
+from utils.wrappers.adni import get_image_paths, load_demographics
+from sklearn.model_selection import train_test_split
 
 
-class ISLESDataset(PersistentDataset):
+class ADNISegDataset(Dataset):
+    """Dataset for the ADNI segmentation pretraining task.
+
+        Args:
+            images_path (str, optional): 
+                Root directory of the preprocessed ADNI mri/segmentation dataset.
+                Defaults to ``"./data/images"``.
+            split (Literal["train", "test", None], optional): 
+                The data split (test/train). If None, will not split. Defaults to ``None``.
+            test_ratio (float, optional): 
+                The ratio of test to total images. Must be in ``(0, 1)``.
+            range (tuple, optional):
+                The index range of images to consider. 
+                Note: if ``split`` is specified ``len(dataset) < (range[1] - range[0])``
+            domain_augment (bool, optional):
+                Whether to apply domain augmentations.
+                Defaults to ``False``.
+            random_seed (int, optional):
+                Random seed for data shuffling.
+                Defaults to ``42``.
+    """
     # mask_add_bgc: whether to add a background channel to the target mask
     def __init__(
         self,
-        split="train",
+        images_path="./data/images",
+        split=None, 
+        test_ratio=0.1,
         range=None,
-        mask_add_bgc=True,
-        random_crop=False,
         domain_augment=False,
         random_seed=42,
-        cache_dir="./monai_cache",
     ):
-        self.mask_add_bgc = mask_add_bgc
-        self.random_crop = random_crop
+        super().__init__()
+        
+        self.image_paths = get_image_paths(images_path, range)        
 
-        self.metadata, self.features, self.labels = get_dataset_filepaths(
-            f"./data/{split}", range
-        )
+        # Data splitting 
+        if split is not None:
+            train, test = train_test_split(
+                self.image_paths, test_size=test_ratio, random_state=random_seed
+            )
+        
+            if split == "train":
+                self.image_paths = train
+            elif split == "test":
+                self.image_paths = test
 
-        self.parsed_metadata = [self.parse_metadata(file) for file in self.metadata]
+        image_key = "mri"
+        label_key = "seg"
 
-        data_dicts = [
-            {"image": img, "mask": lbl, "metadata": meta}
-            for img, lbl, meta in zip(self.features, self.labels, self.parsed_metadata)
-        ]
-
-        print(len(self.features))
-
-        fixed_transforms = [
-            LoadImaged(keys=["image", "mask"]),
-            EnsureChannelFirstd(keys=["image", "mask"]),
-            Spacingd(
-                keys=["image", "mask"],
-                pixdim=(1.0, 1.0, 1.0),
-                mode=("bilinear", "nearest"),
-            ),
-            Orientationd(keys=["image", "mask"], axcodes="RAS"),
-            ResizeWithPadOrCropd(
-                keys=["image", "mask"],
-                spatial_size=(256, 256, 256),
-                mode="constant",
-            ),
+        transform_list = [
+            LoadImaged(keys=[image_key, label_key]),
+            EnsureChannelFirstd(keys=[image_key, label_key]),
         ]
 
         domain_aug_transforms = [
-            # RandBiasFieldd(
-            #     keys=["image"],
-            #     degree=3,
-            #     coeff_range=(0.0, 0.1),
-            #     prob=0.8,
-            # ),
+            RandBiasFieldd(
+                keys=[image_key],
+                degree=3,
+                coeff_range=(0.0, 0.1),
+                prob=0.8,
+            ),
             Rand3DElasticd(
-                keys=["image", "label"],
+                keys=[image_key, label_key],
                 prob=0.2,
                 sigma_range=(5, 8),
                 magnitude_range=(100, 200),
                 mode=("bilinear", "nearest"),
                 padding_mode="zeros",
             ),
-            RandFlipd(keys=["image", "label"], spatial_axis=0, prob=0.8),
-            RandFlipd(keys=["image", "label"], spatial_axis=1, prob=0.8),
-            RandFlipd(keys=["image", "label"], spatial_axis=2, prob=0.8),
+            RandFlipd(keys=[image_key, label_key], spatial_axis=0, prob=0.8),
+            RandFlipd(keys=[image_key, label_key], spatial_axis=1, prob=0.8),
+            RandFlipd(keys=[image_key, label_key], spatial_axis=2, prob=0.8),
             RandRotated(
-                keys=["image", "label"],
+                keys=[image_key, label_key],
                 range_x=0.4,  # rotation range in radians
                 range_y=0.4,
                 range_z=0.4,
@@ -105,71 +106,31 @@ class ISLESDataset(PersistentDataset):
                 prob=0.8,
             ),
             # 2. Intensity: Apply ONLY to image
-            RandGaussianNoised(keys=["image"], mean=0.0, std=0.1, prob=0.8),
+            RandGaussianNoised(keys=[image_key], mean=0.0, std=0.1, prob=0.8),
             RandAdjustContrastd(
-                keys=["image"],
+                keys=[image_key],
                 gamma=(0.5, 2.0),  # Contrast adjustment range
                 prob=0.8,
             ),
-            RandShiftIntensityd(keys=["image"], prob=0.8, offsets=0.1),
+            RandShiftIntensityd(keys=[image_key], prob=0.8, offsets=0.1),
         ]
 
-        super().__init__(
-            data=data_dicts,
-            transform=Compose(fixed_transforms),
-            cache_dir=cache_dir,
-        )
-
-        dynamic_transforms = []
-
         if domain_augment:
-            dynamic_transforms.extend(domain_aug_transforms)
+            transform_list.extend(domain_aug_transforms)
 
-        self.dynamic_transforms = Compose(dynamic_transforms)
+        self.transforms = Compose(transform_list)
 
-    def parse_metadata(self, filepath):
-        # 0: days_post_stroke missing? 0/1
-        # 1: chronicity missing? 0/1
-        # 2: days_post_stroke: float or nan
-        # 3: chronicity: 0/1/2 or nan
-        out = torch.empty((4), dtype=torch.float32)
-        meta = pd.read_csv(filepath)
-        if len(meta) > 0:
-            dps = meta["DAYS_POST_STROKE"][0]
-            chronicity = meta["CHRONICITY"][0]
-
-            # print(type(chronicity))
-
-            if np.isnan(dps):
-                out[0] = 1.0
-                out[2] = 0.0
-            else:
-                out[0] = 0.0
-                out[2] = dps
-
-            if np.isnan(chronicity):
-                out[1] = 1.0
-                out[3] = 0.0
-            else:
-                out[1] = 0.0
-                out[3] = float(chronicity)
-
-        else:
-            out[0] = 1.0
-            out[1] = 1.0
-            out[2] = 0.0
-            out[3] = 0.0
+    def __getitem__(self, idx):
+        entry = self.image_paths[idx]
+        
+        dict_ = {
+            "mri": entry["mri_path"],
+            "seg": entry["seg_path"]
+        }
+        
+        out = self.transforms(dict_)
 
         return out
 
-    def __getitem__(self, idx):
-        data_dict = super().__getitem__(idx)
-        out = self.dynamic_transforms(data_dict)
-
-        if self.random_crop:
-            return out[0]
-        else:
-            return out
-
     def __len__(self):
-        return len(self.features)
+        return len(self.image_paths)
