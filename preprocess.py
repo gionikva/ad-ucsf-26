@@ -148,7 +148,7 @@ def delete_extra_files(dir: str):
     
 
 def preprocess_adni_pipeline(
-    dicom_dir: str, out_dir: str, target_spacing: tuple = (1.0, 1.0, 1.0)
+    dicom_dir: str, out_dir: str, output_size: int, target_spacing: tuple = (1.0, 1.0, 1.0)
 ):
     """
     Full pipeline:
@@ -193,7 +193,7 @@ def preprocess_adni_pipeline(
             NormalizeIntensityd(keys=["image"]),  # Z-score normalization
             ResizeWithPadOrCropd(
                 keys=["image", "label"],
-                spatial_size=(256, 256, 256),
+                spatial_size=(output_size, output_size, output_size),
             ),
         ]
     )
@@ -264,6 +264,7 @@ def main():
     parser.add_argument("-o", "--output-dir", type=str, default="./data/images")
     parser.add_argument("-q", "--qc", type=str, default="./data/tables/MRIQC.csv")
     parser.add_argument("-n", "--max-images", type=int, required=False, default=None)
+    parser.add_argument("-d", "--output-size", type=int, choices=[128, 256], default=256)
     parser.add_argument("-s", "--seed", type=int, default=42)
     # Whether to resume from when the script crashed/terminated
     # Assumes that -n and -s parameters stay the same between runs
@@ -277,6 +278,7 @@ def main():
     qc_file = args.qc 
     max_images = args.max_images
     resume = args.resume
+    out_size = args.output_size
 
     usable_dirs = list_usable_dcm_dirs(
         adni_root=adni_root,
@@ -327,7 +329,7 @@ def main():
 
         os.makedirs(img_out_dir, exist_ok=True)
 
-        preprocess_adni_pipeline(path, img_out_dir)
+        preprocess_adni_pipeline(path, img_out_dir, out_size)
 
     # input_dcm_folder = "path/to/ADNI/002_S_0295/MPRAGE/2006-04-18_.../S13408"
     # output_nii = "path/to/ADNI_clean/002_S_0295_MPRAGE_preprocessed.nii.gz"
