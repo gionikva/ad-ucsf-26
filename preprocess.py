@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
-import itk
 import monai
 from monai.transforms import (
     Compose,
