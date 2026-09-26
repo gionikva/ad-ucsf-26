@@ -26,7 +26,7 @@ from monai.transforms import (
 from monai.data import NibabelWriter
 import nibabel as nib
 import pandas as pd
-from utils.shared import get_image_dirs
+from utils.wrappers.adni import get_image_dirs
 import random
 
 def dcm_series_to_sitk(dicom_dir: str) -> sitk.Image:
