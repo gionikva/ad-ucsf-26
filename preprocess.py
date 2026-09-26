@@ -267,7 +267,7 @@ def main():
     parser.add_argument("-s", "--seed", type=int, default=42)
     # Whether to resume from when the script crashed/terminated
     # Assumes that -n and -s parameters stay the same between runs
-    parser.add_argument("-r", "--resume", type=bool, default=False) 
+    parser.add_argument("-r", "--resume", action="store_true") 
     
     args = parser.parse_args()
     
