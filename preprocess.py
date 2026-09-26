@@ -136,8 +136,6 @@ def percentile_clip(metatensor: MetaTensor):
 #         raise RuntimeError(f"FAST failed:\n{result.stderr}")
 
 def run_ants_atropos(input_dir):
-    os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = "16"
-
     # 1. Load skull-stripped image and brain mask
     t1 = ants.image_read(os.path.join(input_dir, "temp.nii.gz"))
     mask = mask = ants.threshold_image(t1, low_thresh=1e-5, high_thresh=float("inf"))
@@ -150,7 +148,7 @@ def run_ants_atropos(input_dir):
         i="KMeans[3]",  # Initialization (or pass tissue prior images)
         m="[0.2,1x1x1]",  # MRF smoothness weight and radius (spatial prior)
         c="[5,0.0001]",  # 5 iterations max or convergence threshold
-        verbose=1
+        verbose=0
     )
 
     # segmentation['segmentation'] -> Hard label mask (1=CSF, 2=GM, 3=WM)
@@ -284,6 +282,7 @@ def main():
     parser.add_argument("-i", "--input-dir", type=str, default="./data/raw/ADNI")
     parser.add_argument("-o", "--output-dir", type=str, default="./data/images")
     parser.add_argument("-q", "--qc", type=str, default="./data/tables/MRIQC.csv")
+    parser.add_argument("-t", "--threads", type=int, default=16)
     parser.add_argument("-n", "--max-images", type=int, required=False, default=None)
     parser.add_argument("-d", "--output-size", type=int, choices=[128, 256], default=256)
     parser.add_argument("-s", "--seed", type=int, default=42)
@@ -294,12 +293,16 @@ def main():
     args = parser.parse_args()
     
     seed = args.seed
+    threads = args.threads
     adni_root = args.input_dir
     out_dir = args.output_dir
     qc_file = args.qc 
     max_images = args.max_images
     resume = args.resume
     out_size = args.output_size
+    
+    # Seats number of threads to use for segmentation
+    os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(threads)
 
     usable_dirs = list_usable_dcm_dirs(
         adni_root=adni_root,
