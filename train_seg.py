@@ -43,22 +43,16 @@ def calculate_deep_supervision_loss(preds_list, targets, criterion, weights):
 
 
 def get_losses(
-    model, images, metadata, targets, criterion, model_type, deep_supervision
+    model, images, targets, criterion, deep_supervision
 ):
-    if model_type == "base":
-        if deep_supervision:
-            preds = model.forward_deep(images, metadata)
-        else:
-            logits = model.forward(images, metadata)
-            preds = [logits]
+    if deep_supervision:
+        preds = model.forward_deep(images)
     else:
-        if deep_supervision:
-            preds = model.forward_deep(images, metadata)
-        else:
-            preds = model.forward_train(images, metadata)
-
+        logits = model.forward(images)
+        preds = [logits]
+  
     return calculate_deep_supervision_loss(
-        preds, targets, criterion, [2.0, 1.0, 0.5, 0.25, 0.125]
+        preds, targets, criterion, [2.0, 1.0, 0.5, 0.25]
     )
 
 
@@ -66,7 +60,6 @@ def train_model(
     model: LightMedSeg,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    model_type,
     num_epochs=100,
     # learning rate range initial (max) to final (min)
     lr=(2e-4, 1e-9),
@@ -106,22 +99,16 @@ def train_model(
         train_loop = tqdm(train_loader, desc="Train")
 
         for batch in train_loop:
-
-            images = batch["image"].to(device)
-            metadata = batch["metadata"].to(device)
-            targets = batch["mask"].to(device)
-
-            # print("BATCH SHAPE:", images.shape)
-
+            images = batch["mri"].to(device)
+            targets = batch["seg"].to(device)
+            
             optimizer.zero_grad(set_to_none=True)
 
             deep_loss, (loss, l_dice, l_ce, l_bdry) = get_losses(
                 model,
                 images,
-                metadata,
                 targets,
                 criterion,
-                model_type,
                 deep_supervision,
             )
 
@@ -161,17 +148,14 @@ def train_model(
             val_loop = tqdm(val_loader, desc="Val")
 
             for batch in val_loop:
-                images = batch["image"].to(device)
-                metadata = batch["metadata"].to(device)
-                targets = batch["mask"].to(device)
+                images = batch["mri"].to(device)
+                targets = batch["seg"].to(device)
 
                 _, (loss, l_dice, l_ce, l_bdry) = get_losses(
                     model,
                     images,
-                    metadata,
                     targets,
                     criterion,
-                    model_type,
                     deep_supervision,
                 )
 
@@ -262,23 +246,13 @@ def parse_arguments():
         default="small",
     )
     parser.add_argument(
-        "-m",
-        "--model",
-        help="Whether to use the base model or the one with boundary refinement.",
-        default="base",
-        choices=["base", "refined"],
+        "-d",
+        "--downsample",
+        help="Downsample the input features to avoid running out of memory.",
+        action="store_true"
     )
     parser.add_argument(
         "--deep-supervision", help="Use deep supervision.", action="store_true"
-    )
-    parser.add_argument(
-        "-d",
-        "--ignore-metadata",
-        help="Disables the metadata FiLM functionality.",
-        action="store_true",
-    )
-    parser.add_argument(
-        "-c", "--crop", help="Train using random crop.", action="store_true"
     )
     parser.add_argument(
         "-a",
@@ -302,15 +276,12 @@ def parse_arguments():
     split = args.lr_range.split(":")
     parsed["lr_range"] = (float(split[0]), float(split[1]))
 
-    parsed["model"] = args.model
     parsed["model_size"] = args.model_size
     parsed["epochs"] = args.epochs
     parsed["batch_size"] = args.batch_size
-    parsed["crop"] = args.crop
     parsed["domain_augment"] = args.domain_augment
     parsed["deep_supervision"] = args.deep_supervision
-    parsed["metadata_film"] = not args.ignore_metadata
-    parsed["downsample"] = not args.crop
+    parsed["downsample"] = args.downsample
     parsed["resume"] = args.resume
     rng = args.range
     parsed["data_range"] = None if rng == None else [int(idx) for idx in rng.split(":")]
@@ -327,27 +298,28 @@ def main():
     lr_range = args["lr_range"]
     epochs = args["epochs"]
     batch_size = args["batch_size"]
-    crop = args["crop"]
     domain_augment = args["domain_augment"]
     deep_supervision = args["deep_supervision"]
-    metadata_film = args["metadata_film"]
     downsample = args["downsample"]
     resume = args["resume"]
     data_range = args["data_range"]
-    print(data_range)
 
-    dataset = ISLESDataset(
-        split="train", range=data_range, random_crop=crop, domain_augment=domain_augment
+    dataset = ADNISegDataset(
+        split="train",
+        test_ratio=0.1,
+        range=data_range, 
+        domain_augment=domain_augment
     )
 
     print(len(dataset))
-
-    train_size = int(0.8 * len(dataset))
+    
+    val_ratio = 0.2
+    train_ratio = 1.0 - val_ratio
+    
+    # Train/validation split
+    train_size = int(train_ratio * len(dataset))
     val_size = len(dataset) - train_size
-
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-
-    # print(len(train_dataset))
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
@@ -357,11 +329,7 @@ def main():
         best_weights_path = os.path.join(output_dir, "best.pth")
 
         checkpoint = torch.load(last_weights_path)
-        model_type = checkpoint["model"]
-        if model_type == "base":
-            model = LightMedSeg.load(last_weights_path)
-        else:
-            model = LMSBR.load(last_weights_path)
+        model = LightMedSeg.load(last_weights_path)
 
         last_epoch = checkpoint["metadata"]["epoch"]
         best_val_loss = torch.load(best_weights_path)["metadata"]["val_loss"]
@@ -371,52 +339,31 @@ def main():
         best_val_loss = float('inf')
         optimizer_state_dict = None
 
-        if args["model"] == "base":
-            if args["model_size"] == "small":
-                model = LightMedSeg.small(
-                    n_classes=2,
-                    in_channels=1,
-                    metadata_film=metadata_film,
-                    downsample=downsample,
-                )
-            elif args["model_size"] == "medium":
-                model = LightMedSeg.medium(
-                    n_classes=2,
-                    in_channels=1,
-                    metadata_film=metadata_film,
-                    downsample=downsample,
-                )
-            else:
-                model = LightMedSeg.large(
-                    n_classes=2,
-                    in_channels=1,
-                    metadata_film=metadata_film,
-                    downsample=downsample,
-                )
-        else:
-            if args["model_size"] == "small":
-                model = LMSBR.small(
-                    n_classes=2,
-                    metadata_film=metadata_film,
-                )
-            elif args["model_size"] == "medium":
-                model = LMSBR.medium(
-                    n_classes=2,
-                    metadata_film=metadata_film,
-                )
-            else:
-                model = LMSBR.large(
-                    n_classes=2,
-                    metadata_film=metadata_film,
-                )
 
-    print(sum(p.numel() for p in model.parameters() if p.requires_grad))
+      
+        if args["model_size"] == "small":
+            model = LightMedSeg.small(
+                n_classes=4,
+                in_channels=1,
+                metadata_film=False,
+                downsample=downsample,
+            )
+        elif args["model_size"] == "medium":
+            model = LightMedSeg.medium(
+                n_classes=4,
+                in_channels=1,
+                metadata_film=False,
+                downsample=downsample,
+            )
+        else:
+            model = LightMedSeg.large(
+                n_classes=4,
+                in_channels=1,
+                metadata_film=False,
+                downsample=downsample,
+            )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # out_dir = Path(output_dir)
-
-    # for part in
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -424,7 +371,6 @@ def main():
         model,
         train_loader,
         val_loader,
-        model_type=args["model"],
         num_epochs=epochs,
         device=device,
         lr=lr_range,
@@ -436,11 +382,6 @@ def main():
         save_path_best=os.path.join(output_dir, "best.pth"),
         save_path_last=os.path.join(output_dir, "last.pth"),
     )
-
-    # image = dataset[0]["image"].to(device)
-    # mask = dataset[0]["mask"].to(device)
-
-    # visualize_prediction(model, image, mask)
 
 
 if __name__ == "__main__":

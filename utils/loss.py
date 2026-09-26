@@ -1,13 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-from torch.amp import autocast, GradScaler
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-
-from models.lightmedseg import LightMedSeg
-
 
 class LightMedSegLoss(nn.Module):
     def __init__(self, ce_only=False, num_classes=2):

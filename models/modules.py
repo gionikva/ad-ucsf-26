@@ -198,7 +198,7 @@ class Encoder(Module):
 
         self.max_pool = nn.MaxPool3d(2, 2) if downsample else nn.Identity()
 
-    def forward(self, f0_prime, S, T, metadata):
+    def forward(self, f0_prime, S, T, metadata=None):
         convout = self.ghost_conv(f0_prime)
         conditioned = self.spatial_film(S, convout)
 

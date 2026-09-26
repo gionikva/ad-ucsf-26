@@ -174,7 +174,7 @@ class LightMedSeg(Module):
     def hyperparams(self):
         return self._hyperparams
 
-    def forward_deep(self, X, metadata):
+    def forward_deep(self, X, metadata=None):
         _, _, D, H, W = X.shape
         embedding = self.embedding_stem(X)
         anchors = self.anchor_detector(embedding)
@@ -218,5 +218,5 @@ class LightMedSeg(Module):
         
         return out, ds_out_3, ds_out_2, ds_out_1
 
-    def forward(self, X, metadata):
+    def forward(self, X, metadata=None):
         return self.forward_deep(X, metadata)[0]
