@@ -17,6 +17,7 @@ from monai.transforms import (
     RandShiftIntensityd,
     RandBiasFieldd,
     Rand3DElasticd,
+    AsDiscreted
 )
 from utils.wrappers.adni import get_image_paths, load_demographics
 from sklearn.model_selection import train_test_split
@@ -74,6 +75,7 @@ class ADNISegDataset(Dataset):
         transform_list = [
             LoadImaged(keys=[image_key, label_key]),
             EnsureChannelFirstd(keys=[image_key, label_key]),
+            AsDiscreted(keys=[label_key], to_onehot=4), # Conversion of fast output to 4-channel map
         ]
 
         domain_aug_transforms = [
@@ -130,6 +132,8 @@ class ADNISegDataset(Dataset):
         
         out = self.transforms(dict_)
 
+        print(out["mri"].size(), out["seg"].size())
+        
         return out
 
     def __len__(self):
