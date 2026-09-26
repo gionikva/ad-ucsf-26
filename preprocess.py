@@ -202,7 +202,7 @@ def preprocess_adni_pipeline(
     img = out["image"].squeeze(0)
     seg = out["label"].squeeze(0)
     
-    img = normalized.squeeze(0) if normalized.ndim == 4 else normalized
+    img = img.squeeze(0) if img.ndim == 4 else img
     
     writer.set_data_array(img, channel_dim=None)
     writer.set_metadata({"affine": img.affine})
