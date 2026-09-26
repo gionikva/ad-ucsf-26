@@ -1,11 +1,13 @@
 import os
 from os import listdir
+from tabnanny import verbose
 from typing import Any
 from pandas.core.frame import DataFrame
 import subprocess
 from argparse import ArgumentParser
 from monai.data.meta_tensor import MetaTensor
 import torch
+import ants
 from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
@@ -115,24 +117,45 @@ def percentile_clip(metatensor: MetaTensor):
     return metatensor
 
 
-def run_fsl_fast(input_dir: str):
-    """Uses FSL-fast to segment brain into GM, WM, CSF."""
-    cmd = [
-        "fast",
-        "-t",
-        "1",  # T1-weighted
-        "-n",
-        "3",
-        "-N",
-        "-o",
-        os.path.join(input_dir, "img"),
-        os.path.join(input_dir, "temp.nii.gz")
-    ]
+# def run_fsl_fast(input_dir: str):
+#     """Uses FSL-fast to segment brain into GM, WM, CSF."""
+#     cmd = [
+#         "fast",
+#         "-t",
+#         "1",  # T1-weighted
+#         "-n",
+#         "3",
+#         "-N",
+#         "-o",
+#         os.path.join(input_dir, "img"),
+#         os.path.join(input_dir, "temp.nii.gz")
+#     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"FAST failed:\n{result.stderr}")
+#     result = subprocess.run(cmd, capture_output=True, text=True)
+#     if result.returncode != 0:
+#         raise RuntimeError(f"FAST failed:\n{result.stderr}")
 
+def run_ants_atropos(input_dir):
+    os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = "16"
+
+    # 1. Load skull-stripped image and brain mask
+    t1 = ants.image_read(os.path.join(input_dir, "temp.nii.gz"))
+    mask = mask = ants.threshold_image(t1, low_thresh=1e-5, high_thresh=float("inf"))
+
+    # 2. Run Atropos (k=3 for CSF, GM, WM)
+    # 'PriorIntensityGMM' or 'Socrates' with MRF weight provides FAST-equivalent behavior
+    segmentation = ants.atropos(
+        a=t1,
+        x=mask,
+        i="KMeans[3]",  # Initialization (or pass tissue prior images)
+        m="[0.2,1x1x1]",  # MRF smoothness weight and radius (spatial prior)
+        c="[5,0.0001]",  # 5 iterations max or convergence threshold
+        verbose=1
+    )
+
+    # segmentation['segmentation'] -> Hard label mask (1=CSF, 2=GM, 3=WM)
+    # segmentation['probabilityimages'] -> 4D array / list of posterior probability maps
+    ants.image_write(segmentation["segmentation"], os.path.join(input_dir, "img_seg.nii.gz"))
 
 def delete_extra_files(dir: str):
     """
@@ -177,8 +200,7 @@ def preprocess_adni_pipeline(
     writer.set_metadata({"affine": img.affine})
     writer.write(os.path.join(out_dir, f"temp.nii.gz"))
 
-    run_fsl_fast(out_dir)
-    
+    run_ants_atropos(out_dir)
     
     img_path = os.path.join(out_dir, f"img.nii.gz")
     seg_path = os.path.join(out_dir, f"img_seg.nii.gz")
@@ -304,7 +326,7 @@ def main():
                 if "img.nii.gz" in files and "img_seg.nii.gz" in files:
                     processed_images.add(image.name)
                 if len(files) > 2:
-                    remove_extra_files(image.path)
+                    delete_extra_files(image.path)
     
     last_index = -1
     
