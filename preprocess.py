@@ -1,3 +1,4 @@
+from ants.core.ants_image import ANTsImage
 import os
 from os import listdir
 from tabnanny import verbose
@@ -28,6 +29,11 @@ from monai.data import NibabelWriter
 import nibabel as nib
 import pandas as pd
 from utils.wrappers.adni import get_image_dirs
+from utils.preprocessing import (
+    sitk_to_monai,
+    monai_to_ants,
+    ants_to_monai,
+)
 import random
 
 
@@ -87,26 +93,6 @@ def skull_strip(image: sitk.Image, mask: sitk.Image) -> sitk.Image:
     return masked_image
 
 
-def sitk_to_metatensor(image: sitk.Image) -> MetaTensor:
-    """
-    Converts a SimpleITK image to a Monai metatensor for transforms.
-    """
-    # 1. SimpleITK array is (Z, Y, X) -> transpose to (X, Y, Z) and add channel -> (1, X, Y, Z)
-    data = sitk.GetArrayFromImage(image).transpose(2, 1, 0)
-    tensor = torch.from_numpy(data).unsqueeze(0)
-
-    # 2. Build 4x4 Affine matrix
-    spacing = np.array(image.GetSpacing())
-    origin = np.array(image.GetOrigin())
-    direction = np.array(image.GetDirection()).reshape(3, 3)
-
-    affine = np.eye(4, dtype=np.float32)
-    affine[:3, :3] = direction * spacing
-    affine[:3, 3] = origin
-
-    return MetaTensor(tensor, affine=torch.from_numpy(affine))
-
-
 def percentile_clip(metatensor: MetaTensor):
     """
     Clips the tensor to the 1st and 99th percentile values to reduce noise.
@@ -137,15 +123,16 @@ def percentile_clip(metatensor: MetaTensor):
 #         raise RuntimeError(f"FAST failed:\n{result.stderr}")
 
 
-def run_ants_atropos(input_dir):
+def ants_atropos(input_img) -> ANTsImage:
     # 1. Load skull-stripped image and brain mask
-    t1 = ants.image_read(os.path.join(input_dir, "temp.nii.gz"))
-    mask = mask = ants.threshold_image(t1, low_thresh=1e-5, high_thresh=float("inf"))
+    mask = mask = ants.threshold_image(
+        input_img, low_thresh=1e-5, high_thresh=float("inf")
+    )
 
     # 2. Run Atropos (k=3 for CSF, GM, WM)
     # 'PriorIntensityGMM' or 'Socrates' with MRF weight provides FAST-equivalent behavior
     segmentation = ants.atropos(
-        a=t1,
+        a=input_img,
         x=mask,
         i="KMeans[3]",  # Initialization (or pass tissue prior images)
         m="[0.2,1x1x1]",  # MRF smoothness weight and radius (spatial prior)
@@ -155,9 +142,7 @@ def run_ants_atropos(input_dir):
 
     # segmentation['segmentation'] -> Hard label mask (1=CSF, 2=GM, 3=WM)
     # segmentation['probabilityimages'] -> 4D array / list of posterior probability maps
-    ants.image_write(
-        segmentation["segmentation"], os.path.join(input_dir, "img_seg.nii.gz")
-    )
+    return segmentation["segmentation"]
 
 
 def delete_extra_files(dir: str):
@@ -176,6 +161,7 @@ def preprocess_adni_pipeline(
     dicom_dir: str,
     out_dir: str,
     output_size: int,
+    device="cpu",
     target_spacing: tuple = (1.0, 1.0, 1.0),
 ):
     """
@@ -185,8 +171,9 @@ def preprocess_adni_pipeline(
     sitk_img = dcm_series_to_sitk(dicom_dir)
     n4_corrected, initial_mask = apply_n4_bias_field_correction(sitk_img)
     brain_extracted = skull_strip(n4_corrected, initial_mask)
-    tensor = sitk_to_metatensor(brain_extracted)
+    tensor = sitk_to_monai(brain_extracted)
     tensor = percentile_clip(tensor)
+    tensor.to(device)
 
     pre_fast = Compose(
         [
@@ -197,26 +184,18 @@ def preprocess_adni_pipeline(
     )
 
     normalized = pre_fast(tensor)
-    writer = NibabelWriter()
-    img = normalized.squeeze(0) if normalized.ndim == 4 else normalized
-
-    temp_path = os.path.join(out_dir, f"temp.nii.gz")
-
-    writer.set_data_array(img, channel_dim=None)
-    writer.set_metadata({"affine": img.affine})
-    writer.write(os.path.join(out_dir, f"temp.nii.gz"))
-
-    run_ants_atropos(out_dir)
+    
+    img = normalized.squeeze(0) if normalized.ndim == 4 else normalized    
+    seg = ants_to_monai(ants_atropos(monai_to_ants(img)), device)
 
     img_path = os.path.join(out_dir, f"img.nii.gz")
     seg_path = os.path.join(out_dir, f"img_seg.nii.gz")
 
-    dct = {"image": temp_path, "label": seg_path}
+    dct = {"image": img, "label": seg}
 
     final_transforms = Compose(
         [
-            LoadImaged(keys=["image", "label"]),
-            EnsureChannelFirstd(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"], channel_dim="no_channel"),
             NormalizeIntensityd(keys=["image"]),  # Z-score normalization
             ResizeWithPadOrCropd(
                 keys=["image", "label"],
@@ -226,10 +205,11 @@ def preprocess_adni_pipeline(
     )
 
     out = final_transforms(dct)
+    
     img = out["image"].squeeze(0)
     seg = out["label"].squeeze(0)
-
-    img = img.squeeze(0) if img.ndim == 4 else img
+    
+    writer = NibabelWriter()
 
     writer.set_data_array(img, channel_dim=None)
     writer.set_metadata({"affine": img.affine})
@@ -238,8 +218,6 @@ def preprocess_adni_pipeline(
     writer.set_data_array(seg, channel_dim=None)
     writer.set_metadata({"affine": seg.affine})
     writer.write(seg_path)
-
-    os.remove(os.path.join(out_dir, "temp.nii.gz"))
 
     delete_extra_files(out_dir)
     # Remove unneeded files
@@ -349,6 +327,9 @@ def main():
     max_images = args.max_images
     resume = args.resume
     out_size = args.output_size
+
+    # Argument validation
+    assert out_size % 16 == 0, "Output size must be a multiple of 16!"
 
     # Seats number of threads to use for segmentation
     os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(threads)
