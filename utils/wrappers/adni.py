@@ -26,8 +26,8 @@ def get_image_paths(root: str, range: tuple = None) -> list:
             if "img.nii.gz" in filenames and "img_seg.nii.gz" in filenames:
                 ret.append(
                     {
-                        "image_path": os.path.join(dir, "img.nii.gz"),
-                        "label_path": os.path.join(dir, "img_seg.nii.gz"),
+                        "mri_path": os.path.join(image.path, "img.nii.gz"),
+                        "seg_path": os.path.join(image.path, "img_seg.nii.gz"),
                         "image_id": int(image.name),
                         "subject_id": subject.name,
                     }
