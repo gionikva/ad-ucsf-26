@@ -164,7 +164,7 @@ def preprocess_adni_pipeline(
         [
             CropForeground(),
             Spacing(pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
-            Orientation(axcodes="RAS"),
+            Orientation(axcodes="RAS", labels=None),
         ]
     )
 
