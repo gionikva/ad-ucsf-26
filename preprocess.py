@@ -30,6 +30,7 @@ import pandas as pd
 from utils.wrappers.adni import get_image_dirs
 import random
 
+
 def dcm_series_to_sitk(dicom_dir: str) -> sitk.Image:
     """
     Reads a directory of 2D .dcm slices and stacks them into a 3D SimpleITK Image,
@@ -135,6 +136,7 @@ def percentile_clip(metatensor: MetaTensor):
 #     if result.returncode != 0:
 #         raise RuntimeError(f"FAST failed:\n{result.stderr}")
 
+
 def run_ants_atropos(input_dir):
     # 1. Load skull-stripped image and brain mask
     t1 = ants.image_read(os.path.join(input_dir, "temp.nii.gz"))
@@ -148,27 +150,33 @@ def run_ants_atropos(input_dir):
         i="KMeans[3]",  # Initialization (or pass tissue prior images)
         m="[0.2,1x1x1]",  # MRF smoothness weight and radius (spatial prior)
         c="[5,0.0001]",  # 5 iterations max or convergence threshold
-        verbose=0
+        verbose=0,
     )
 
     # segmentation['segmentation'] -> Hard label mask (1=CSF, 2=GM, 3=WM)
     # segmentation['probabilityimages'] -> 4D array / list of posterior probability maps
-    ants.image_write(segmentation["segmentation"], os.path.join(input_dir, "img_seg.nii.gz"))
+    ants.image_write(
+        segmentation["segmentation"], os.path.join(input_dir, "img_seg.nii.gz")
+    )
+
 
 def delete_extra_files(dir: str):
     """
     Deletes unneeded extra files in the directory to save space.
     """
     needed_files = ["img_seg.nii.gz", "img.nii.gz"]
-    
+
     for file in os.scandir(dir):
         path = file.path
         if file.name not in needed_files:
             os.remove(path)
-    
+
 
 def preprocess_adni_pipeline(
-    dicom_dir: str, out_dir: str, output_size: int, target_spacing: tuple = (1.0, 1.0, 1.0)
+    dicom_dir: str,
+    out_dir: str,
+    output_size: int,
+    target_spacing: tuple = (1.0, 1.0, 1.0),
 ):
     """
     Full pipeline:
@@ -199,7 +207,7 @@ def preprocess_adni_pipeline(
     writer.write(os.path.join(out_dir, f"temp.nii.gz"))
 
     run_ants_atropos(out_dir)
-    
+
     img_path = os.path.join(out_dir, f"img.nii.gz")
     seg_path = os.path.join(out_dir, f"img_seg.nii.gz")
 
@@ -220,22 +228,22 @@ def preprocess_adni_pipeline(
     out = final_transforms(dct)
     img = out["image"].squeeze(0)
     seg = out["label"].squeeze(0)
-    
+
     img = img.squeeze(0) if img.ndim == 4 else img
-    
+
     writer.set_data_array(img, channel_dim=None)
     writer.set_metadata({"affine": img.affine})
     writer.write(img_path)
-    
+
     writer.set_data_array(seg, channel_dim=None)
     writer.set_metadata({"affine": seg.affine})
     writer.write(seg_path)
-    
+
     os.remove(os.path.join(out_dir, "temp.nii.gz"))
-    
+
     delete_extra_files(out_dir)
     # Remove unneeded files
-    
+
 
 def list_usable_dcm_dirs(
     adni_root: str, mriqc_csv: str, min_slices: int = 20
@@ -254,7 +262,7 @@ def list_usable_dcm_dirs(
 
     usable = []
     for root, _, files in os.walk(adni_path):
-        
+
         dcm_count = sum(1 for f in files if f.lower().endswith(".dcm"))
         if dcm_count < min_slices:
             continue
@@ -278,29 +286,70 @@ def list_usable_dcm_dirs(
 
 def main():
     parser = ArgumentParser()
-    
-    parser.add_argument("-i", "--input-dir", type=str, default="./data/raw/ADNI")
-    parser.add_argument("-o", "--output-dir", type=str, default="./data/images")
-    parser.add_argument("-q", "--qc", type=str, default="./data/tables/MRIQC.csv")
-    parser.add_argument("-t", "--threads", type=int, default=16)
-    parser.add_argument("-n", "--max-images", type=int, required=False, default=None)
-    parser.add_argument("-d", "--output-size", type=int, choices=[128, 256], default=256)
-    parser.add_argument("-s", "--seed", type=int, default=42)
-    # Whether to resume from when the script crashed/terminated
-    # Assumes that -n and -s parameters stay the same between runs
-    parser.add_argument("-r", "--resume", action="store_true") 
-    
+
+    parser.add_argument(
+        "-i",
+        "--input-dir",
+        help="Input directory.",
+        type=str,
+        default="./data/raw/ADNI",
+    )
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        help="Output directory.",
+        type=str,
+        default="./data/images",
+    )
+    parser.add_argument(
+        "-q",
+        "--qc",
+        help="MRI quality control file path.",
+        type=str,
+        default="./data/tables/MRIQC.csv",
+    )
+    parser.add_argument(
+        "-t",
+        "--threads",
+        help="Number of threads for segmentation algorithm.",
+        type=int,
+        default=16,
+    )
+    parser.add_argument(
+        "-n",
+        "--max-images",
+        help="Maximum images to process.",
+        type=int,
+        required=False,
+        default=None,
+    )
+    parser.add_argument(
+        "-d",
+        "--output-size",
+        help="Output image size. Must be a multiple of 16.",
+        type=int,
+        default=256,
+    )
+    parser.add_argument("-s", "--seed", help="Random seed.", type=int, default=42)
+    parser.add_argument(
+        "-r",
+        "--resume",
+        help="Whether to resume from when the script crashed/terminated. \
+                              Assumes that -n and -s parameters stay the same between runs.",
+        action="store_true",
+    )
+
     args = parser.parse_args()
-    
+
     seed = args.seed
     threads = args.threads
     adni_root = args.input_dir
     out_dir = args.output_dir
-    qc_file = args.qc 
+    qc_file = args.qc
     max_images = args.max_images
     resume = args.resume
     out_size = args.output_size
-    
+
     # Seats number of threads to use for segmentation
     os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(threads)
 
@@ -311,15 +360,15 @@ def main():
     )
 
     # Export to DataFrame for processing pipelines
- 
+
     print(f"\nFound {len(usable_dirs)} usable scan series.")
 
     raw_images: DataFrame = pd.DataFrame(usable_dirs)
     # Shuffle and retain a maximum of max_images images
     raw_images = raw_images.sample(frac=1, random_state=seed).head(max_images)
-    
+
     total_images = len(raw_images)
-      
+
     processed_images = set()
 
     if resume:
@@ -330,19 +379,21 @@ def main():
                     processed_images.add(image.name)
                 if len(files) > 2:
                     delete_extra_files(image.path)
-    
+
     last_index = -1
-    
+
     for i, entry in raw_images.iterrows():
         image_id = entry["image_id"]
         if image_id in processed_images:
             last_index = i
-    
-    raw_images = raw_images.iloc[last_index+1:]
-    
+
+    raw_images = raw_images.iloc[last_index + 1 :]
+
     print(len(raw_images))
 
-    for _, row in tqdm(raw_images.iterrows(), initial = last_index + 1, leave=True, total=total_images):
+    for _, row in tqdm(
+        raw_images.iterrows(), initial=last_index + 1, leave=True, total=total_images
+    ):
         path = row["path"]
         subject = row["subject_id"]
         image_id = row["image_id"]
