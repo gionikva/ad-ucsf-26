@@ -1,6 +1,6 @@
 numpy
 pandas
-pytorch
+torch
 nibabel
 monai
 tqdm
