@@ -1,9 +1,9 @@
 numpy
 pandas
 torch
+scikit-learn
 nibabel
 monai
 tqdm
 SimpleITK
 antspyx
-scikit-learn

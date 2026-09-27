@@ -1,3 +1,4 @@
+from torch._tensor import Tensor
 from ants.core.ants_image import ANTsImage
 import os
 from os import listdir
@@ -16,118 +17,104 @@ from tqdm import tqdm
 import monai
 from monai.transforms import (
     Compose,
-    Spacing,
-    Orientation,
-    ScaleIntensityRange,
+    Spacingd,
+    Orientationd,
     NormalizeIntensityd,
-    CropForeground,
+    CropForegroundd,
     LoadImaged,
+    EnsureTyped,
     ResizeWithPadOrCropd,
     EnsureChannelFirstd,
+    CropForeground,
+    Spacing,
+    Orientation,
 )
 from monai.data import NibabelWriter
 import nibabel as nib
 import pandas as pd
-from utils.wrappers.adni import get_image_dirs
-from utils.preprocessing import (
-    sitk_to_monai,
-    monai_to_ants,
-    ants_to_monai,
-)
 import random
 
+from utils.preprocessing import dcm_series_to_sitk, ants_to_monai
 
-def dcm_series_to_sitk(dicom_dir: str) -> sitk.Image:
+
+def crop_foreground_sitk(
+    image: sitk.Image, threshold: float = 0.0, margin: int = 0
+) -> sitk.Image:
     """
-    Reads a directory of 2D .dcm slices and stacks them into a 3D SimpleITK Image,
-    preserving coordinate spaces, origin, spacing, and directions.
+    Crops empty background (e.g. air) from a SimpleITK image by finding the
+    bounding box of voxels above `threshold` and cropping to that region.
+    Mirrors MONAI's CropForeground default behavior (img > 0).
     """
-    reader = sitk.ImageSeriesReader()
-    series_ids = reader.GetGDCMSeriesIDs(dicom_dir)
-    if not series_ids:
-        raise FileNotFoundError(f"No valid DICOM series found in: {dicom_dir}")
-
-    # Load the first series found in the directory
-    dicom_names = reader.GetGDCMSeriesFileNames(dicom_dir, series_ids[0])
-    reader.SetFileNames(dicom_names)
-    image = reader.Execute()
-    return sitk.Cast(image, sitk.sitkFloat32)
-
-
-def apply_n4_bias_field_correction(image: sitk.Image) -> tuple[sitk.Image, sitk.Image]:
-    """
-    Computes an Otsu background mask and corrects RF inhomogeneity.
-    Returns: (corrected_image, brain_mask)
-    """
-    # Generate initial foreground mask to guide N4
-    mask = sitk.OtsuThreshold(image, 0, 1, 200)
-
-    # Optional: shrink image for faster spline computation
-    shrink_factor = [2, 2, 2]
-    shrunk_image = sitk.Shrink(image, shrink_factor)
-    shrunk_mask = sitk.Shrink(mask, shrink_factor)
-
-    corrector = sitk.N4BiasFieldCorrectionImageFilter()
-    corrector.SetMaximumNumberOfIterations([50, 50, 30, 20])
-    corrector.SetConvergenceThreshold(0.001)
-
-    _ = corrector.Execute(shrunk_image, shrunk_mask)
-
-    # Evaluate full-resolution bias field
-    log_bias_field = corrector.GetLogBiasFieldAsImage(image)
-    corrected_image = image / sitk.Exp(log_bias_field)
-
-    return corrected_image, mask
-
-
-def skull_strip(image: sitk.Image, mask: sitk.Image) -> sitk.Image:
-    """
-    Applies the binary mask to zero out background/skull non-brain voxels.
-    """
-    # Morphological opening and largest connected component to isolate cerebrum/cerebellum
-    cleaned_mask = sitk.BinaryMorphologicalOpening(mask, (3, 3, 3))
-    cleaned_mask = sitk.RelabelComponent(sitk.ConnectedComponent(cleaned_mask)) == 1
-
-    # Zero-out voxels outside the mask
-    masked_image = sitk.Mask(image, cleaned_mask, maskingValue=0.0)
-    return masked_image
-
-
-def percentile_clip(metatensor: MetaTensor):
-    """
-    Clips the tensor to the 1st and 99th percentile values to reduce noise.
-    """
-    array = metatensor.array
-    lower = np.percentile(array, 1)
-    upper = np.percentile(array, 99)
-    metatensor.array = np.clip(array, lower, upper)
-    return metatensor
-
-
-# def run_fsl_fast(input_dir: str):
-#     """Uses FSL-fast to segment brain into GM, WM, CSF."""
-#     cmd = [
-#         "fast",
-#         "-t",
-#         "1",  # T1-weighted
-#         "-n",
-#         "3",
-#         "-N",
-#         "-o",
-#         os.path.join(input_dir, "img"),
-#         os.path.join(input_dir, "temp.nii.gz")
-#     ]
-
-#     result = subprocess.run(cmd, capture_output=True, text=True)
-#     if result.returncode != 0:
-#         raise RuntimeError(f"FAST failed:\n{result.stderr}")
-
-
-def ants_atropos(input_img) -> ANTsImage:
-    # 1. Load skull-stripped image and brain mask
-    mask = mask = ants.threshold_image(
-        input_img, low_thresh=1e-5, high_thresh=float("inf")
+    mask = sitk.BinaryThreshold(
+        image,
+        lowerThreshold=threshold,
+        upperThreshold=1e9,
+        insideValue=1,
+        outsideValue=0,
     )
+
+    stats = sitk.LabelShapeStatisticsImageFilter()
+    stats.Execute(mask)
+    if not stats.HasLabel(1):
+        return image  # nothing above threshold — return unchanged
+
+    bbox = stats.GetBoundingBox(1)  # (x, y, z, size_x, size_y, size_z) in 3D
+    ndim = image.GetDimension()
+    start = list(bbox[:ndim])
+    size = list(bbox[ndim:])
+
+    img_size = image.GetSize()
+    for i in range(ndim):
+        start[i] = max(0, start[i] - margin)
+        end = min(img_size[i], start[i] + size[i] + 2 * margin)
+        size[i] = end - start[i]
+
+    return sitk.RegionOfInterest(image, size=size, index=start)
+
+
+def skullstrip(
+    input_path: str,
+    output_path: str,
+    gpu: bool = True,
+    image: str = "freesurfer/synthstrip:1.8-gpu",
+):
+
+    input_path = Path(input_path).resolve()
+    output_path = Path(output_path).resolve()
+
+    input_dir = input_path.parent
+    output_dir = output_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = ["docker", "run", "--rm"]
+    if gpu:
+        cmd += ["--gpus", "all"]
+
+    cmd += [
+        "-v",
+        f"{input_dir}:/input",
+        "-v",
+        f"{output_dir}:/output",
+        image,
+        "-i",
+        f"/input/{input_path.name}",
+        "-o",
+        f"/output/{output_path.name}",
+    ]
+
+    if gpu:
+        cmd += ["-g"]
+
+    subprocess.run(cmd, check=True)
+
+
+def n4_correct(image: ANTsImage) -> ANTsImage:
+    return ants.n4_bias_field_correction(image=image, shrink_factor=2)
+
+
+def ants_atropos(input_img: ANTsImage) -> ANTsImage:
+    # 1. Load skull-stripped image and brain mask
+    mask = ants.threshold_image(input_img, low_thresh=1e-5, high_thresh=float("inf"))
 
     # 2. Run Atropos (k=3 for CSF, GM, WM)
     # 'PriorIntensityGMM' or 'Socrates' with MRF weight provides FAST-equivalent behavior
@@ -140,9 +127,18 @@ def ants_atropos(input_img) -> ANTsImage:
         verbose=0,
     )
 
-    # segmentation['segmentation'] -> Hard label mask (1=CSF, 2=GM, 3=WM)
-    # segmentation['probabilityimages'] -> 4D array / list of posterior probability maps
     return segmentation["segmentation"]
+
+
+# def percentile_clip(metatensor: MetaTensor):
+#     """
+#     Clips the tensor to the 1st and 99th percentile values to reduce noise.
+#     """
+#     array = metatensor.array
+#     lower = np.percentile(array, 1)
+#     upper = np.percentile(array, 99)
+#     metatensor.array = np.clip(array, lower, upper)
+#     return metatensor
 
 
 def delete_extra_files(dir: str):
@@ -161,41 +157,45 @@ def preprocess_adni_pipeline(
     dicom_dir: str,
     out_dir: str,
     output_size: int,
-    device="cpu",
+    gpu: bool = False,
     target_spacing: tuple = (1.0, 1.0, 1.0),
 ):
     """
     Full pipeline:
     DCM -> N4 Bias Correction -> Skull Stripping -> 1mm Resampling (RAS) -> Intensity Percentile Clip -> Z-Score Normalization -> NIfTI
     """
-    sitk_img = dcm_series_to_sitk(dicom_dir)
-    n4_corrected, initial_mask = apply_n4_bias_field_correction(sitk_img)
-    brain_extracted = skull_strip(n4_corrected, initial_mask)
-    tensor = sitk_to_monai(brain_extracted)
-    tensor = percentile_clip(tensor)
-    tensor.to(device)
 
-    pre_fast = Compose(
-        [
-            CropForeground(),
-            Spacing(pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
-            Orientation(axcodes="RAS", labels=None),
-        ]
-    )
+    img_path = os.path.join(out_dir, "img.nii.gz")
+    seg_path = os.path.join(out_dir, "img_seg.nii.gz")
 
-    normalized = pre_fast(tensor)
-    
-    img = normalized.squeeze(0) if normalized.ndim == 4 else normalized    
-    seg = ants_to_monai(ants_atropos(monai_to_ants(img)), device)
+    raw = dcm_series_to_sitk(dicom_dir)
+    cropped = crop_foreground_sitk(raw)
 
-    img_path = os.path.join(out_dir, f"img.nii.gz")
-    seg_path = os.path.join(out_dir, f"img_seg.nii.gz")
+    sitk.WriteImage(cropped, img_path)
 
-    dct = {"image": img, "label": seg}
+    # ants.image_write(/raw, img_path)
 
-    final_transforms = Compose(
+    skullstrip(img_path, img_path, gpu=gpu)
+
+    skull_stripped = ants.image_read(img_path)
+
+    n4_corrected = n4_correct(skull_stripped)
+    segmented = ants_atropos(n4_corrected)
+
+    image = ants_to_monai(n4_corrected)
+    label = ants_to_monai(segmented)
+
+    dct = {"image": image, "label": label}
+
+    transforms = Compose(
         [
             EnsureChannelFirstd(keys=["image", "label"], channel_dim="no_channel"),
+            Spacingd(
+                keys=["image", "label"],
+                pixdim=(1.0, 1.0, 1.0),
+                mode=("bilinear", "nearest"),
+            ),
+            Orientationd(keys=["image", "label"], axcodes="RAS", labels=None),
             NormalizeIntensityd(keys=["image"]),  # Z-score normalization
             ResizeWithPadOrCropd(
                 keys=["image", "label"],
@@ -204,18 +204,18 @@ def preprocess_adni_pipeline(
         ]
     )
 
-    out = final_transforms(dct)
-    
-    img = out["image"].squeeze(0)
-    seg = out["label"].squeeze(0)
-    
+    out = transforms(dct)
+
+    img = out["image"]
+    seg = out["label"]
+
     writer = NibabelWriter()
 
-    writer.set_data_array(img, channel_dim=None)
+    writer.set_data_array(img, channel_dim=0)
     writer.set_metadata({"affine": img.affine})
     writer.write(img_path)
 
-    writer.set_data_array(seg, channel_dim=None)
+    writer.set_data_array(seg, channel_dim=0)
     writer.set_metadata({"affine": seg.affine})
     writer.write(seg_path)
 
@@ -316,6 +316,9 @@ def main():
                               Assumes that -n and -s parameters stay the same between runs.",
         action="store_true",
     )
+    parser.add_argument(
+        "-g", "--gpu", help="Run skullstrip on gpu.", action="store_true"
+    )
 
     args = parser.parse_args()
 
@@ -327,6 +330,7 @@ def main():
     max_images = args.max_images
     resume = args.resume
     out_size = args.output_size
+    gpu = args.gpu
 
     # Argument validation
     assert out_size % 16 == 0, "Output size must be a multiple of 16!"
@@ -385,7 +389,7 @@ def main():
 
         os.makedirs(img_out_dir, exist_ok=True)
 
-        preprocess_adni_pipeline(path, img_out_dir, out_size)
+        preprocess_adni_pipeline(path, img_out_dir, out_size, gpu)
 
     # input_dcm_folder = "path/to/ADNI/002_S_0295/MPRAGE/2006-04-18_.../S13408"
     # output_nii = "path/to/ADNI_clean/002_S_0295_MPRAGE_preprocessed.nii.gz"

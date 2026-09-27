@@ -1,0 +1,1 @@
+docker pull freesurfer/synthstrip:1.8-gpu
