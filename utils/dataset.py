@@ -131,8 +131,6 @@ class ADNISegDataset(Dataset):
         }
         
         out = self.transforms(dict_)
-
-        print(out["mri"].size(), out["seg"].size())
         
         return out
 
