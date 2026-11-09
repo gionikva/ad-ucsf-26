@@ -11,6 +11,7 @@ from models.modules import (
     Decoder,
 )
 
+
 class LightMedSeg(Module):
     def __init__(
         self,
@@ -90,7 +91,7 @@ class LightMedSeg(Module):
             stage_channels[1], stage_channels[0], num_anchors=num_anchors, upsample=True
         )
         self.D4 = Decoder(stage_channels[0], 8, num_anchors=num_anchors, upsample=True)
-        
+
         # Auxillary segmentation heads for deep supervision
         self.aux_head_1 = nn.Conv3d(
             stage_channels[2], n_classes, kernel_size=1, stride=1, padding=0
@@ -101,7 +102,7 @@ class LightMedSeg(Module):
         self.aux_head_3 = nn.Conv3d(
             stage_channels[0], n_classes, kernel_size=1, stride=1, padding=0
         )
-        
+
         self.segmentation_head = nn.Conv3d(
             8, n_classes, kernel_size=1, stride=1, padding=0
         )
@@ -127,7 +128,6 @@ class LightMedSeg(Module):
         )
         model.load_state_dict(checkpoint["model_state_dict"])
         return model
-      
 
     def save(self, path, metadata=None):
         save_dict = {
@@ -202,21 +202,68 @@ class LightMedSeg(Module):
         # del d2_out, skip_3
         d4_out = self.D4(d3_out, skip_4, anchors)
         # del d3_out, skip_4
-        
-        # Deep supervision logits 
+
+        # Deep supervision logits
         logits_ds_1 = self.aux_head_1(d1_out)
         logits_ds_2 = self.aux_head_2(d2_out)
         logits_ds_3 = self.aux_head_3(d3_out)
         # Output logits
         logits = self.segmentation_head(d4_out)
-        
+
         # Interpolation to output resolution
-        ds_out_1 = F.interpolate(logits_ds_1, (D, H, W), mode="trilinear", align_corners=False)
-        ds_out_2 = F.interpolate(logits_ds_2, (D, H, W), mode="trilinear", align_corners=False)
-        ds_out_3 = F.interpolate(logits_ds_3, (D, H, W), mode="trilinear", align_corners=False)
+        ds_out_1 = F.interpolate(
+            logits_ds_1, (D, H, W), mode="trilinear", align_corners=False
+        )
+        ds_out_2 = F.interpolate(
+            logits_ds_2, (D, H, W), mode="trilinear", align_corners=False
+        )
+        ds_out_3 = F.interpolate(
+            logits_ds_3, (D, H, W), mode="trilinear", align_corners=False
+        )
         out = F.interpolate(logits, (D, H, W), mode="trilinear", align_corners=False)
-        
+
         return out, ds_out_3, ds_out_2, ds_out_1
 
     def forward(self, X, metadata=None):
         return self.forward_deep(X, metadata)[0]
+
+    def forward_bottleneck(self, X, metadata=None):
+        _, _, D, H, W = X.shape
+        embedding = self.embedding_stem(X)
+        anchors = self.anchor_detector(embedding)
+        T, f0 = self.lspm(embedding)
+        # print(T, f0, anchors)
+        e1_out, E1 = self.E1(f0, anchors, T, metadata)
+        # print(e1_out.shape)
+        e2_out, E2 = self.E2(e1_out, anchors, T, metadata)
+        # del e1_out
+        e3_out, E3 = self.E3(e2_out, anchors, T, metadata)
+        # del e2_out
+        e4_out, E4 = self.E4(e3_out, anchors, T, metadata)
+        # del e3_out
+        skip_1, skip_2, skip_3, skip_4 = self.skip_fusion(E1, E2, E3, E4)
+        # del E1, E2, E3, E4
+        # print(E1.shape, E2.shape, E3.shape, E4.shape)
+        # print(skip_1.shape, skip_2.shape, skip_3.shape, skip_4.shape)
+        # print(e1_out.shape, e2_out.shape, e3_out.shape, e4_out.shape)
+
+        d1_out = self.D1(e4_out, skip_1, anchors)
+        # del e4_out, skip_1
+        d2_out = self.D2(d1_out, skip_2, anchors)
+        # del d1_out, skip_2
+        d3_out = self.D3(d2_out, skip_3, anchors)
+        # del d2_out, skip_3
+        d4_out = self.D4(d3_out, skip_4, anchors)
+
+        # Fused bottleneck output dimensions
+        _, _, D, H, W = skip_3.shape
+        d4_upsampled = F.interpolate(
+            d4_out, (D, H, W), mode="trilinear", align_corners=False
+        )
+        skip_4_upsampled = F.interpolate(
+            skip_4, (D, H, W), mode="trilinear", align_corners=False
+        )
+        
+        out = torch.cat([d4_upsampled, skip_4_upsampled, skip_3])
+        
+        return out
