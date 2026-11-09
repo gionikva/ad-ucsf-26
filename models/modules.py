@@ -2,6 +2,8 @@ from torch.nn import Module
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+from typing import tuple
+
 
 class GhostConv3D(Module):
     def __init__(self, in_channels, out_channels=8, downscale=True, ratio=2):
@@ -48,7 +50,7 @@ class GhostConv3D(Module):
 
         self.group_norm = nn.GroupNorm(n_groups, out_channels)
 
-    def forward(self, X):
+    def forward(self, X) -> torch.Tensor:
         x1 = self.primary(X)
         x2 = self.depthwise(x1)
         cat = torch.cat([x1, x2], dim=1)
@@ -88,7 +90,7 @@ class GlobalAnchorDetector(Module):
 
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x):
+    def forward(self, x) -> torch.Tensor:
         batch_size = x.shape[0]
 
         x1 = self.phi(x)
@@ -107,7 +109,7 @@ class SpatialAnchorFiLM(Module):
         self.gamma_proj = nn.Linear(num_anchors * 3, in_channels)
         self.beta_proj = nn.Linear(num_anchors * 3, in_channels)
 
-    def forward(self, S, gconvout):
+    def forward(self, S, gconvout) -> torch.Tensor:
 
         s = S.flatten(start_dim=1)
         gamma = self.gamma_proj(s)
@@ -135,7 +137,7 @@ class MetadataFiLM(nn.Module):
         nn.init.zeros_(self.mlp[-1].weight)
         nn.init.zeros_(self.mlp[-1].bias)
 
-    def forward(self, x, metadata):
+    def forward(self, x, metadata) -> torch.Tensor:
         gamma, beta = self.mlp(metadata).chunk(2, dim=1)
 
         gamma = gamma[:, :, None, None, None]
@@ -159,10 +161,10 @@ class SEBlock(Module):
             nn.Sigmoid(),
         )
 
-    def forward(self, input):
+    def forward(self, input) -> torch.Tensor:
         z = self.bottleneck(input)
         z = z[:, :, None, None, None]
-        
+
         out = z * input
         return out
 
@@ -198,7 +200,9 @@ class Encoder(Module):
 
         self.max_pool = nn.MaxPool3d(2, 2) if downsample else nn.Identity()
 
-    def forward(self, f0_prime, S, T, metadata=None):
+    def forward(
+        self, f0_prime, S, T, metadata=None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         convout = self.ghost_conv(f0_prime)
         conditioned = self.spatial_film(S, convout)
 
@@ -217,7 +221,7 @@ class Encoder(Module):
 
         out = self.max_pool(E_i)
         return out, E_i
-    
+
 
 class MultiScaleSkipFusion(Module):
     def __init__(self, stage_channels):
@@ -321,8 +325,9 @@ class MultiScaleSkipFusion(Module):
             padding=0,
         )
 
-    def forward(self, E_1, E_2, E_3, E_4):
-
+    def forward(
+        self, E_1, E_2, E_3, E_4
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
         size_4 = E_1.shape[2:]
         size_3 = E_2.shape[2:]
@@ -465,7 +470,7 @@ class Decoder(Module):
         dists = x_diff + y_diff + z_diff
         return self.spb_conv(dists)
 
-    def forward(self, input, skip, anchors):
+    def forward(self, input, skip, anchors) -> torch.Tensor:
         u = self.upsample_conv(input)
         spb = self.create_spb(anchors, u.shape[2:], device=u.device)
 
