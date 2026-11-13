@@ -118,9 +118,10 @@ class MSRCog(nn.Module):
         # Concatenate along channel dimension
         return torch.cat([bottleneck, skip_2, skip_1], dim=1)
 
-    def forward(self, X, demographics):
-
-        mask = self.mask_gen(X)[:, 0:1, :, :, :]
+    def forward(self, X, demographics):        
+        mask = torch.softmax(self.mask_gen(X), dim=1)
+        
+        mask = mask[:, 0:1, :, :, :]
                 
         masked = torch.mul(mask, X)
 
