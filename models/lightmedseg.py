@@ -241,29 +241,13 @@ class LightMedSeg(Module):
         # del e2_out
         e4_out, E4 = self.E4(e3_out, anchors, T, metadata)
         # del e3_out
-        skip_1, skip_2, skip_3, skip_4 = self.skip_fusion(E1, E2, E3, E4)
+        skip_1, skip_2, _, _ = self.skip_fusion(E1, E2, E3, E4)
         # del E1, E2, E3, E4
         # print(E1.shape, E2.shape, E3.shape, E4.shape)
         # print(skip_1.shape, skip_2.shape, skip_3.shape, skip_4.shape)
         # print(e1_out.shape, e2_out.shape, e3_out.shape, e4_out.shape)
 
-        d1_out = self.D1(e4_out, skip_1, anchors)
-        # del e4_out, skip_1
-        d2_out = self.D2(d1_out, skip_2, anchors)
-        # del d1_out, skip_2
-        d3_out = self.D3(d2_out, skip_3, anchors)
-        # del d2_out, skip_3
-        d4_out = self.D4(d3_out, skip_4, anchors)
 
         # Fused bottleneck output dimensions
-        _, _, D, H, W = skip_3.shape
-        d4_upsampled = F.interpolate(
-            d4_out, (D, H, W), mode="trilinear", align_corners=False
-        )
-        skip_4_upsampled = F.interpolate(
-            skip_4, (D, H, W), mode="trilinear", align_corners=False
-        )
         
-        out = torch.cat([d4_upsampled, skip_4_upsampled, skip_3])
-        
-        return out
+        return e4_out, skip_2, skip_1
