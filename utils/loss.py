@@ -1,3 +1,6 @@
+from torch.nn.modules.loss import MSELoss
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -90,3 +93,12 @@ class LightMedSegLoss(nn.Module):
         else:
             return loss_ce, torch.tensor(0.), loss_ce, torch.tensor(0.) 
   
+class MSRCogLoss(nn.Module):
+    def __init__(self):
+        super().__init__()    
+        
+    def forward(self, mask, logits, targets):
+        mse_loss = F.mse_loss(logits, targets)
+        intensity_loss = torch.sum(mask, dim=(1, 2, 3))
+        total_loss = mse_loss + intensity_loss
+        return total_loss, mse_loss, intensity_loss
