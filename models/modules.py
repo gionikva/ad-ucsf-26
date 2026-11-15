@@ -2,7 +2,7 @@ from torch.nn import Module
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
-from typing import tuple
+# from typing import Tuple
 
 
 class GhostConv3D(Module):
