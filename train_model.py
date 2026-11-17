@@ -18,6 +18,7 @@ def train_model(
     num_epochs=100,
     # learning rate range initial (max) to final (min)
     lr=(2e-4, 1e-9),
+    w_int=1.0,
     device="cuda",
     last_epoch=-1,
     best_val_loss=float("inf"),
@@ -32,7 +33,7 @@ def train_model(
     if optimizer_state_dict is not None:
         optimizer.load_state_dict(optimizer_state_dict)
 
-    criterion = MSRCogLoss()
+    criterion = MSRCogLoss(w_int=w_int)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, eta_min=lr[1], T_max=num_epochs, last_epoch=last_epoch
     )
@@ -325,6 +326,7 @@ def main():
         num_epochs=epochs,
         device=device,
         lr=lr_range,
+        w_int=1.0,
         last_epoch=last_epoch,
         optimizer_state_dict=optimizer_state_dict,
         best_val_loss=best_val_loss,

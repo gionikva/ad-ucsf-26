@@ -94,11 +94,17 @@ class LightMedSegLoss(nn.Module):
             return loss_ce, torch.tensor(0.), loss_ce, torch.tensor(0.) 
   
 class MSRCogLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, w_int = 1.):
+        """
+            Loss function for the cogscore prediction task.
+            w_int represents the mask intensity regularization weight.
+        """
+        self.w_int = w_int
         super().__init__()    
         
     def forward(self, mask, logits, targets):
+        _, _, D, H, W = mask.size()
         mse_loss = F.mse_loss(logits, targets)
-        intensity_loss = torch.sum(mask)
-        total_loss = mse_loss + intensity_loss
+        intensity_loss = torch.sum(mask) / D * H * W
+        total_loss = mse_loss + self.w_int * intensity_loss
         return total_loss, mse_loss, intensity_loss
