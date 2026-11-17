@@ -17,7 +17,7 @@ from monai.transforms import (
     RandShiftIntensityd,
     RandBiasFieldd,
     Rand3DElasticd,
-    AsDiscreted
+    AsDiscreted,
 )
 from utils.wrappers.adni import get_image_paths, load_demographics
 from sklearn.model_selection import train_test_split
@@ -26,44 +26,45 @@ from sklearn.model_selection import train_test_split
 class ADNISegDataset(Dataset):
     """Dataset for the ADNI segmentation pretraining task.
 
-        Args:
-            images_path (str, optional): 
-                Root directory of the preprocessed ADNI mri/segmentation dataset.
-                Defaults to ``"./data/images"``.
-            split (Literal["train", "test", None], optional): 
-                The data split (test/train). If None, will not split. Defaults to ``None``.
-            test_ratio (float, optional): 
-                The ratio of test to total images. Must be in ``(0, 1)``.
-            range (tuple, optional):
-                The index range of images to consider. 
-                Note: if ``split`` is specified ``len(dataset) < (range[1] - range[0])``
-            domain_augment (bool, optional):
-                Whether to apply domain augmentations.
-                Defaults to ``False``.
-            random_seed (int, optional):
-                Random seed for data shuffling.
-                Defaults to ``42``.
+    Args:
+        images_path (str, optional):
+            Root directory of the preprocessed ADNI mri/segmentation dataset.
+            Defaults to ``"./data/images"``.
+        split (Literal["train", "test", None], optional):
+            The data split (test/train). If None, will not split. Defaults to ``None``.
+        test_ratio (float, optional):
+            The ratio of test to total images. Must be in ``(0, 1)``.
+        range (tuple, optional):
+            The index range of images to consider.
+            Note: if ``split`` is specified ``len(dataset) < (range[1] - range[0])``
+        domain_augment (bool, optional):
+            Whether to apply domain augmentations.
+            Defaults to ``False``.
+        random_seed (int, optional):
+            Random seed for data shuffling.
+            Defaults to ``42``.
     """
+
     # mask_add_bgc: whether to add a background channel to the target mask
     def __init__(
         self,
         images_path="./data/images",
-        split=None, 
+        split=None,
         test_ratio=0.1,
         range=None,
         domain_augment=False,
         random_seed=42,
     ):
         super().__init__()
-        
-        self.image_paths = get_image_paths(images_path, range)        
 
-        # Data splitting 
+        self.image_paths = get_image_paths(images_path, range)
+
+        # Data splitting
         if split is not None:
             train, test = train_test_split(
                 self.image_paths, test_size=test_ratio, random_state=random_seed
             )
-        
+
             if split == "train":
                 self.image_paths = train
             elif split == "test":
@@ -75,7 +76,9 @@ class ADNISegDataset(Dataset):
         transform_list = [
             LoadImaged(keys=[image_key, label_key]),
             EnsureChannelFirstd(keys=[image_key, label_key]),
-            AsDiscreted(keys=[label_key], to_onehot=4), # Conversion of fast output to 4-channel map
+            AsDiscreted(
+                keys=[label_key], to_onehot=4
+            ),  # Conversion of fast output to 4-channel map
         ]
 
         domain_aug_transforms = [
@@ -124,60 +127,61 @@ class ADNISegDataset(Dataset):
 
     def __getitem__(self, idx):
         entry = self.image_paths[idx]
-        
-        dict_ = {
-            "mri": entry["mri_path"],
-            "seg": entry["seg_path"]
-        }
-        
+
+        dict_ = {"mri": entry["mri_path"], "seg": entry["seg_path"]}
+
         out = self.transforms(dict_)
-        
+
         return out
 
     def __len__(self):
         return len(self.image_paths)
 
+
 class ADNICogDataset(Dataset):
     """Dataset for the ADNI cogscore prediction task.
 
-        Args:
-            images_path (str, optional): 
-                Root directory of the preprocessed ADNI mri/segmentation dataset.
-                Defaults to ``"./data/images"``.
-            split (Literal["train", "test", None], optional): 
-                The data split (test/train). If None, will not split. Defaults to ``None``.
-            test_ratio (float, optional): 
-                The ratio of test to total images. Must be in ``(0, 1)``.
-            range (tuple, optional):
-                The index range of images to consider. 
-                Note: if ``split`` is specified ``len(dataset) < (range[1] - range[0])``
-            domain_augment (bool, optional):
-                Whether to apply domain augmentations.
-                Defaults to ``False``.
-            random_seed (int, optional):
-                Random seed for data shuffling.
-                Defaults to ``42``.
+    Args:
+        images_path (str, optional):
+            Root directory of the preprocessed ADNI mri/segmentation dataset.
+            Defaults to ``"./data/images"``.
+        split (Literal["train", "test", None], optional):
+            The data split (test/train). If None, will not split. Defaults to ``None``.
+        test_ratio (float, optional):
+            The ratio of test to total images. Must be in ``(0, 1)``.
+        range (tuple, optional):
+            The index range of images to consider.
+            Note: if ``split`` is specified ``len(dataset) < (range[1] - range[0])``
+        domain_augment (bool, optional):
+            Whether to apply domain augmentations.
+            Defaults to ``False``.
+        random_seed (int, optional):
+            Random seed for data shuffling.
+            Defaults to ``42``.
     """
+
     # mask_add_bgc: whether to add a background channel to the target mask
     def __init__(
         self,
         images_path="./data/images",
-        split=None, 
+        split=None,
         test_ratio=0.1,
         range=None,
+        cogscore_range=(0, 12),
         domain_augment=False,
         random_seed=42,
     ):
         super().__init__()
-        
-        self.image_paths = get_image_paths(images_path, range)        
 
-        # Data splitting 
+        self.image_paths = get_image_paths(images_path, range)
+        self.cogscore_range=cogscore_range
+
+        # Data splitting
         if split is not None:
             train, test = train_test_split(
                 self.image_paths, test_size=test_ratio, random_state=random_seed
             )
-        
+
             if split == "train":
                 self.image_paths = train
             elif split == "test":
@@ -202,20 +206,18 @@ class ADNICogDataset(Dataset):
                 prob=0.2,
                 sigma_range=(5, 8),
                 magnitude_range=(100, 200),
-                mode=("bilinear", "nearest"),
+                mode=("bilinear"),
                 padding_mode="zeros",
             ),
             RandFlipd(keys=[image_key], spatial_axis=0, prob=0.8),
             RandFlipd(keys=[image_key], spatial_axis=1, prob=0.8),
             RandFlipd(keys=[image_key], spatial_axis=2, prob=0.8),
             RandRotated(
+                keys=[image_key],
                 range_x=0.4,  # rotation range in radians
                 range_y=0.4,
                 range_z=0.4,
-                mode=[
-                    "trilinear",
-                    "nearest",
-                ],
+                mode=("trilinear"),
                 prob=0.8,
             ),
             # 2. Intensity: Apply ONLY to image
@@ -235,14 +237,14 @@ class ADNICogDataset(Dataset):
 
     def __getitem__(self, idx):
         entry = self.image_paths[idx]
-        
-        dict_ = {
-            "mri": entry["mri_path"],
-            "adas_cog_11": torch.rand(11)
-        }
-        
+
+        cogscore = torch.rand(11)
+
+        rng = self.cogscore_range
+        dict_ = {"mri": entry["mri_path"], "cog": cogscore[rng[0]:rng[1]], "dem": torch.rand(14)}
+
         out = self.transforms(dict_)
-        
+
         return out
 
     def __len__(self):

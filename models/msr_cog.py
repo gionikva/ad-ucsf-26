@@ -112,6 +112,8 @@ class MSRCog(nn.Module):
 
         reg_in_size = D_bn * H_bn * W_bn * rd_channels
         hid_size = reg_in_size // 2
+        
+        print(reg_in_size, D_bn, H_bn, W_bn, rd_channels)
 
         self.bn_reducer = nn.Sequential(
             nn.Conv3d(bn_channels, rd_channels, 1),
@@ -126,13 +128,13 @@ class MSRCog(nn.Module):
     @staticmethod
     def from_seg(
         path,
-        device=None,
-        input_size=None,
-        demo_size=None,
-        out_size=None,
-        mgen_anchors=None,
-        mgen_stage_channels=None,
-        mgen_downsample=None,
+        device="cpu",
+        input_size=(1, 192, 192, 192),
+        demo_size=14,
+        out_size=1,
+        mgen_anchors=256,
+        mgen_stage_channels=(8, 16, 32, 64),
+        mgen_downsample=False,
     ):
         """
         Loads model using pretrained segmentation backbone weights.
@@ -149,7 +151,7 @@ class MSRCog(nn.Module):
             mgen_downsample=mgen_downsample,
             seg_anchors=hparams["num_anchors"],
             seg_stage_channels=hparams["stage_channels"],
-            seg_downample=hparams["downsample"]
+            seg_downsample=hparams["downsample"]
         )
         
         model.seg_backbone.load_state_dict(checkpoint["model_state_dict"])
@@ -227,4 +229,4 @@ class MSRCog(nn.Module):
 
         out = self.reg_head(flattened)
 
-        return out
+        return mask, out

@@ -99,6 +99,6 @@ class MSRCogLoss(nn.Module):
         
     def forward(self, mask, logits, targets):
         mse_loss = F.mse_loss(logits, targets)
-        intensity_loss = torch.sum(mask, dim=(1, 2, 3))
+        intensity_loss = torch.sum(mask)
         total_loss = mse_loss + intensity_loss
         return total_loss, mse_loss, intensity_loss

@@ -154,15 +154,19 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
+        "-w",
         "--seg-weights",
         help="Trained segmentation backbone weights.",
+        required=True,
     )
 
     parser.add_argument(
         "-s",
         "--input-size",
-        help="Input image dimensions as a 3-element tuple.",
-        default=(192, 192, 192),
+        help="Input image dimensions (4-elements: C D H W).",
+        nargs=4,
+        type=int,
+        default=[1, 192, 192, 192],
     )
 
     parser.add_argument(
@@ -194,6 +198,13 @@ def parse_arguments():
         help="Range of datapoints to train on in the format start_idx:end_idx.",
         type=str,
         default=None,
+    )
+
+    parser.add_argument(
+        "-c",
+        "--cogscore-range",
+        help="Range of cogscores to predict in format start_idx:end_idx.",
+        default="0:12",
     )
 
     # parser.add_argument(
@@ -237,6 +248,10 @@ def parse_arguments():
     parsed["resume"] = args.resume
     rng = args.range
     parsed["data_range"] = None if rng == None else [int(idx) for idx in rng.split(":")]
+    cog_rng = args.cogscore_range
+    parsed["cogscore_range"] = (
+        None if cog_rng == None else [int(idx) for idx in cog_rng.split(":")]
+    )
 
     return parsed
 
@@ -257,9 +272,14 @@ def main():
     # downsample = args["downsample"]
     resume = args["resume"]
     data_range = args["data_range"]
+    cogscore_range = args["cogscore_range"]
 
     dataset = ADNICogDataset(
-        split="train", test_ratio=0.1, range=data_range, domain_augment=domain_augment
+        split="train",
+        test_ratio=0.1,
+        range=data_range,
+        domain_augment=domain_augment,
+        cogscore_range=cogscore_range,
     )
 
     print(len(dataset))
