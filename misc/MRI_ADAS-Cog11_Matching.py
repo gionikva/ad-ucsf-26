@@ -65,29 +65,6 @@ def normalize_image_ids(values):
     )
 
 
-def add_dimensions(mayo_data, dimensions_path):
-    """Attach missing spatial dimensions using image IDs."""
-    mayo = mayo_data.copy()
-    mayo["image_id"] = normalize_image_ids(mayo["image_id"])
-    missing = [c for c in ["Rows", "Columns", "SlicesPerVolume"]
-               if c not in mayo.columns]
-    if not missing:
-        return mayo
-    if dimensions_path is None:
-        raise ValueError(
-            f"Mayo metadata lacks {missing}. Supply --dimensions-table "
-            "with image_id and the missing spatial dimensions."
-        )
-    dimensions = read_table(dimensions_path, ["image_id"] + missing)
-    dimensions = dimensions[["image_id"] + missing].copy()
-    dimensions["image_id"] = normalize_image_ids(dimensions["image_id"])
-    dimensions = dimensions.dropna(subset=["image_id"]).drop_duplicates()
-    if dimensions["image_id"].duplicated().any():
-        raise ValueError("Conflicting dimensions for the same image_id.")
-    return mayo.merge(dimensions, on="image_id", how="left",
-                      validate="many_to_one")
-
-
 def match_mri_adas11(
     mri_data,
     mayo_data,
@@ -110,17 +87,12 @@ def match_mri_adas11(
     # A missing or invalid slice count fails the filter.
     mayo = mayo_data.copy()
     mayo["image_id"] = normalize_image_ids(mayo["image_id"])
-    
-    # Require every spatial dimension to meet the minimum.
-    dimensions = mayo[
-        ["Rows", "Columns", "SlicesPerVolume"]
-    ].apply(pd.to_numeric, errors="coerce")
 
-    large_enough = (
-        dimensions.ge(min_slices)
-        .fillna(False)
-        .all(axis=1)
-    )
+    # Require the slice count to meet the minimum. Missing or
+    # non-numeric values become NaN and fail the comparison.
+    large_enough = pd.to_numeric(
+        mayo["SlicesPerVolume"], errors="coerce"
+    ).ge(min_slices)
 
     eligible_ids = mayo.loc[
         normalize_text(mayo["SeriesType"]).str.casefold().eq("t1w")
@@ -282,15 +254,10 @@ def main():
         default=Path("data/tables/ADAS.csv"),
     )
     parser.add_argument(
-        "--dimensions-table",
-        type=Path,
-        help="CSV with image_id and spatial dimensions missing from Mayo.",
-    )
-    parser.add_argument(
         "--min-slices",
         type=int,
         default=100,
-        help="Minimum voxel count required in each spatial dimension.",
+        help="Minimum SlicesPerVolume required in the Mayo inventory.",
     )
     parser.add_argument(
         "--max-gap-days",
@@ -334,7 +301,6 @@ def main():
                 "SlicesPerVolume",
             ],
         )
-        mayo_table = add_dimensions(mayo_table, args.dimensions_table)
         clinical_table = read_table(
             args.clinical,
             ["PTID", "VISDATE"] + SOURCE_SCORES,
