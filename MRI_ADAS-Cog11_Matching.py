@@ -1,4 +1,34 @@
+"""Generate Mayo-filtered MRI–ADAS-Cog11 pairs from CSV metadata."""
+from argparse import ArgumentParser
+from pathlib import Path
+
 import pandas as pd
+
+# ADAS-Cog11 excludes delayed recall (Q4SCORE) and number
+# cancellation (Q13SCORE). The output q1–q11 follows this order.
+SOURCE_SCORES = [
+    "Q1SCORE",
+    "Q2SCORE",
+    "Q3SCORE",
+    "Q5SCORE",
+    "Q6SCORE",
+    "Q7SCORE",
+    "Q8SCORE",
+    "Q9SCORE",
+    "Q10SCORE",
+    "Q11SCORE",
+    "Q12SCORE",
+]
+
+SCORE_LIMITS = [10, 5, 5, 5, 5, 8, 12, 5, 5, 5, 5]
+OUTPUT_SCORES = [f"q{i}" for i in range(1, 12)]
+
+OUTPUT_COLUMNS = [
+    "subject_id",
+    "image_id",
+    "image_date",
+    "score_date",
+] + OUTPUT_SCORES
 
 
 def normalize_text(values):
@@ -14,222 +44,324 @@ def normalize_text(values):
         )
     )
 
+def read_table(path, required_columns):
+    """Read a CSV and report missing headers."""
+    table = pd.read_csv(path, dtype="string")
+    missing = set(required_columns) - set(table.columns)
 
-def match_adni_adas11(
+    if missing:
+        raise ValueError(
+            f"{path} is missing columns: {sorted(missing)}"
+        )
+
+    return table
+
+def normalize_image_ids(values):
+    """Make image IDs such as I12345 and 12345 comparable."""
+    return (
+        normalize_text(values)
+        .str.replace(r"^[Ii]", "", regex=True)
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+
+def add_dimensions(mayo_data, dimensions_path):
+    """Attach missing spatial dimensions using image IDs."""
+    mayo = mayo_data.copy()
+    mayo["image_id"] = normalize_image_ids(mayo["image_id"])
+    missing = [c for c in ["Rows", "Columns", "SlicesPerVolume"]
+               if c not in mayo.columns]
+    if not missing:
+        return mayo
+    if dimensions_path is None:
+        raise ValueError(
+            f"Mayo metadata lacks {missing}. Supply --dimensions-table "
+            "with image_id and the missing spatial dimensions."
+        )
+    dimensions = read_table(dimensions_path, ["image_id"] + missing)
+    dimensions = dimensions[["image_id"] + missing].copy()
+    dimensions["image_id"] = normalize_image_ids(dimensions["image_id"])
+    dimensions = dimensions.dropna(subset=["image_id"]).drop_duplicates()
+    if dimensions["image_id"].duplicated().any():
+        raise ValueError("Conflicting dimensions for the same image_id.")
+    return mayo.merge(dimensions, on="image_id", how="left",
+                      validate="many_to_one")
+
+
+def match_mri_adas11(
     mri_data,
-    clinical,
-    diagnosis,
+    mayo_data,
+    clinical_data,
     *,
-    mri_id_col="image_id",
-    mri_ptid_col="subject_id",
-    mri_date_col="image_date",
-    diagnosis_date_col="EXAMDATE",
-    diagnosis_value_col="DIAGNOSIS",
+    min_slices=100,
     max_gap_days=90,
+    n_images=10000,
+    seed=42,
 ):
-    """Return one output row per MRI, with ADAS11 and diagnosis when available."""
+    """Return sampled, unique MRI IDs with complete ADAS11 subscores."""
+    if min_slices < 1:
+        raise ValueError("min_slices must be at least 1.")
     if max_gap_days < 0:
         raise ValueError("max_gap_days must be nonnegative.")
+    if n_images < 0:
+        raise ValueError("n_images must be nonnegative.")
 
-    # Check the headers up front so a mismatched export gives a clear error.
-    for name, table, required in (
-        ("MRI metadata", mri_data, {mri_id_col, mri_ptid_col, mri_date_col}),
-        ("ADAS11 data", clinical, {"PTID", "EXAMDATE", "ADAS11"}),
-        ("Diagnosis data", diagnosis,
-         {"PTID", diagnosis_date_col, diagnosis_value_col}),
-    ):
-        missing = required - set(table.columns)
-        if missing:
-            raise ValueError(f"{name} is missing columns: {sorted(missing)}")
+    # Filter the Mayo inventory before considering clinical matches.
+    # A missing or invalid slice count fails the filter.
+    mayo = mayo_data.copy()
+    mayo["image_id"] = normalize_image_ids(mayo["image_id"])
+    
+    # Require every spatial dimension to meet the minimum.
+    dimensions = mayo[
+        ["Rows", "Columns", "SlicesPerVolume"]
+    ].apply(pd.to_numeric, errors="coerce")
 
-    # Work on copies. Reset the clinical index so clinical_row refers to
-    # the zero-based row position in the clinical input.
-    scans = mri_data.copy()
-    visits = clinical.copy().reset_index(drop=True)
-    diagnoses = diagnosis.copy()
-
-    scans["_ptid"] = normalize_text(scans[mri_ptid_col]).str.upper()
-    visits["_ptid"] = normalize_text(visits["PTID"]).str.upper()
-    diagnoses["_ptid"] = normalize_text(diagnoses["PTID"]).str.upper()
-
-    # Compare calendar dates. Unparseable values become missing dates.
-    scans["_scan_date"] = pd.to_datetime(
-        scans[mri_date_col], format="mixed", errors="coerce"
-    ).dt.normalize()
-
-    # In ADNIMERGE, EXAMDATE is the clinical visit date. It may differ
-    # from the exact date the participant took the ADAS-Cog11 exam.
-    visits["_visit_date"] = pd.to_datetime(
-        visits["EXAMDATE"], format="mixed", errors="coerce"
-    ).dt.normalize()
-
-    diagnoses["_diagnosis_date"] = pd.to_datetime(
-        diagnoses[diagnosis_date_col], format="mixed", errors="coerce"
-    ).dt.normalize()
-
-    # Keep valid ADAS11 totals, including zero, and exclude missing codes.
-    totals = pd.to_numeric(visits["ADAS11"], errors="coerce")
-    visits["ADAS11"] = totals.where(totals.between(0, 70))
-
-    # Preserve diagnosis codes as supplied by the export. Use the ADNI
-    # data dictionary for your release to interpret numeric codes.
-    diagnoses["_diagnosis"] = normalize_text(diagnoses[diagnosis_value_col])
-
-    # Build independent lookups. A diagnosis visit can be eligible even
-    # when the participant has no ADAS11 score at that visit.
-    score_rows = visits.dropna(subset=["_ptid", "_visit_date", "ADAS11"])
-    diagnosis_rows = diagnoses.dropna(
-        subset=["_ptid", "_diagnosis_date", "_diagnosis"]
+    large_enough = (
+        dimensions.ge(min_slices)
+        .fillna(False)
+        .all(axis=1)
     )
-    scores_by_ptid = dict(tuple(score_rows.groupby("_ptid")))
-    diagnoses_by_ptid = dict(tuple(diagnosis_rows.groupby("_ptid")))
 
-    columns = [
-        "mri_id", "PTID", "scan_date", "status", "reason",
-        "clinical_row", "clinical_visit_date", "VISCODE", "ADAS11",
-        "signed_visit_gap_days", "candidate_count", "match_method",
-        "diagnosis_at_mri", "diagnosis_visit_date", "diagnosis_gap_days",
-        "diagnosis_status",
-    ]
-    output = []
+    eligible_ids = mayo.loc[
+        normalize_text(mayo["SeriesType"]).str.casefold().eq("t1w")
+        & normalize_text(mayo["AcquisitionType"]).str.upper().eq("3D")
+        & large_enough,
+        "image_id",
+    ].dropna()
 
-    for _, scan in scans.iterrows():
-        ptid = scan["_ptid"]
-        scan_date = scan["_scan_date"]
+    scans = mri_data[
+        ["subject_id", "image_id", "image_date"]
+    ].copy()
 
-        result = dict.fromkeys(columns)
-        result.update(
-            mri_id=scan[mri_id_col],
-            PTID=ptid,
-            scan_date=scan_date,
-            status="unmatched",
-            candidate_count=0,
-            diagnosis_status="unknown",
-        )
-        output.append(result)
+    scans["image_id"] = normalize_image_ids(scans["image_id"])
+    scans["subject_id"] = normalize_text(
+        scans["subject_id"]
+    ).str.upper()
 
-        if pd.isna(ptid) or pd.isna(scan_date):
-            result.update(
-                status="review",
-                reason="Missing participant ID or invalid MRI date",
-            )
-            continue
+    scans["image_date"] = pd.to_datetime(
+        scans["image_date"],
+        format="mixed",
+        errors="coerce",
+    ).dt.normalize()
 
-        participant_scores = scores_by_ptid.get(ptid)
-        if participant_scores is None:
-            result["reason"] = "No dated visit with a valid ADAS11 score"
-            continue
+    # Restrict the MRI table to eligible Mayo image IDs.
+    scans = (
+        scans.loc[scans["image_id"].isin(eligible_ids)]
+        .dropna()
+        .drop_duplicates()
+    )
 
-        # Negative gaps mean the visit came before the scan. Positive
-        # gaps mean it came after. Either direction can supply ADAS11.
-        gaps = (participant_scores["_visit_date"] - scan_date).dt.days
-        candidate_gaps = gaps.loc[gaps.abs() <= max_gap_days]
-        result["candidate_count"] = len(candidate_gaps)
-
-        if candidate_gaps.empty:
-            result["reason"] = "No valid ADAS11 score within the date window"
-            continue
-
-        nearest_gap = candidate_gaps.abs().min()
-        nearest_rows = candidate_gaps.index[candidate_gaps.abs() == nearest_gap]
-
-        # Flag ties rather than choosing an assessment arbitrarily.
-        if len(nearest_rows) != 1:
-            result.update(
-                status="review",
-                reason="Multiple equally close ADAS11 records",
-            )
-            continue
-
-        clinical_row = nearest_rows[0]
-        assessment = participant_scores.loc[clinical_row]
-        result.update(
-            status="matched",
-            clinical_row=int(clinical_row),
-            clinical_visit_date=assessment["_visit_date"],
-            VISCODE=assessment.get("VISCODE"),
-            ADAS11=float(assessment["ADAS11"]),
-            signed_visit_gap_days=int(gaps.loc[clinical_row]),
-            match_method="same_day" if nearest_gap == 0 else "nearest_date",
+    # Identical metadata rows are collapsed above. Conflicting metadata
+    # for one image ID needs correction before matching.
+    if scans["image_id"].duplicated().any():
+        raise ValueError(
+            "MRI metadata contains conflicting rows for an image_id."
         )
 
-        # Diagnosis uses a different date rule: only records on or before
-        # the scan are eligible. The ADAS11 window does not limit this lookup.
-        participant_diagnoses = diagnoses_by_ptid.get(ptid)
-        if participant_diagnoses is None:
-            continue
+    print(f"Unique MRI IDs passing the Mayo filters: {len(scans):,}")
 
-        prior = participant_diagnoses.loc[
-            participant_diagnoses["_diagnosis_date"] <= scan_date
-        ]
-        if prior.empty:
-            continue
+    scores = clinical_data[
+        ["PTID", "VISDATE"] + SOURCE_SCORES
+    ].copy()
 
-        latest_date = prior["_diagnosis_date"].max()
-        latest_labels = prior.loc[
-            prior["_diagnosis_date"] == latest_date, "_diagnosis"
-        ].unique()
+    scores = scores.rename(
+        columns={
+            "PTID": "subject_id",
+            "VISDATE": "score_date",
+        }
+    )
 
-        result.update(
-            diagnosis_visit_date=latest_date,
-            diagnosis_gap_days=(scan_date - latest_date).days,
+    scores["subject_id"] = normalize_text(
+        scores["subject_id"]
+    ).str.upper()
+
+    scores["score_date"] = pd.to_datetime(
+        scores["score_date"],
+        format="mixed",
+        errors="coerce",
+    ).dt.normalize()
+
+    # Require all 11 component scores. Negative missing-value codes
+    # and out-of-range scores become missing.
+    for column, maximum in zip(SOURCE_SCORES, SCORE_LIMITS):
+        values = pd.to_numeric(scores[column], errors="coerce")
+        scores[column] = values.where(values.between(0, maximum))
+
+    scores = scores.dropna().drop_duplicates()
+
+    # Match each scan only to assessments from the same participant.
+    candidates = scans.merge(
+        scores,
+        on="subject_id",
+        how="inner",
+    )
+
+    # Use the absolute gap so assessments before or after the scan
+    # can qualify within the configured window.
+    candidates["_gap_days"] = (
+        candidates["image_date"] - candidates["score_date"]
+    ).abs().dt.days
+
+    candidates = candidates.loc[
+        candidates["_gap_days"].le(max_gap_days)
+    ].copy()
+
+    closest_gap = candidates.groupby(
+        "image_id"
+    )["_gap_days"].transform("min")
+
+    nearest = candidates.loc[
+        candidates["_gap_days"].eq(closest_gap)
+    ].copy()
+
+    # Equal-distance assessments or conflicting scores on the closest
+    # date are ambiguous. Exclude those image IDs.
+    ambiguous = nearest["image_id"].duplicated(keep=False)
+    ambiguous_count = nearest.loc[
+        ambiguous, "image_id"
+    ].nunique()
+
+    nearest = nearest.loc[~ambiguous].copy()
+
+    print(f"Image IDs excluded for ambiguous matches: {ambiguous_count:,}")
+
+    # Rename source subscores to the requested output q1–q11.
+    nearest = nearest.rename(
+        columns=dict(zip(SOURCE_SCORES, OUTPUT_SCORES))
+    )
+
+    pairs = (
+        nearest[OUTPUT_COLUMNS]
+        .sort_values("image_id")
+        .reset_index(drop=True)
+    )
+
+    print(f"Eligible MRI–ADAS11 pairs before sampling: {len(pairs):,}")
+
+    # Sample after matching so each selected image has complete targets.
+    # n_images=0 keeps the full eligible list.
+    if n_images > 0:
+        if len(pairs) > n_images:
+            pairs = pairs.sample(
+                n=n_images,
+                random_state=seed,
+            )
+        elif len(pairs) < n_images:
+            print(
+                f"Requested {n_images:,} images; "
+                f"returning all {len(pairs):,} eligible images."
+            )
+
+    return pairs.sort_values(
+        ["subject_id", "image_date", "image_id"]
+    ).reset_index(drop=True)
+
+
+def main():
+    """Load inputs, generate pairs, and save the output CSV."""
+    parser = ArgumentParser(description=__doc__)
+
+    parser.add_argument(
+        "-m",
+        "--mri-table",
+        type=Path,
+        default=Path(
+            "data/tables/All_Subjects_Key_MRI_13Nov2026.csv"
+        ),
+    )
+    parser.add_argument(
+        "-q",
+        "--qc",
+        type=Path,
+        default=Path("data/tables/MRIQC.csv"),
+    )
+    parser.add_argument(
+        "-c",
+        "--clinical",
+        type=Path,
+        default=Path("data/tables/ADAS.csv"),
+    )
+    parser.add_argument(
+        "--dimensions-table",
+        type=Path,
+        help="CSV with image_id and spatial dimensions missing from Mayo.",
+    )
+    parser.add_argument(
+        "--min-slices",
+        type=int,
+        default=100,
+        help="Minimum voxel count required in each spatial dimension.",
+    )
+    parser.add_argument(
+        "--max-gap-days",
+        type=int,
+        default=90,
+        help="Maximum MRI-to-assessment date difference.",
+    )
+    parser.add_argument(
+        "-n",
+        "--n-images",
+        type=int,
+        default=10000,
+        help="Maximum image count; use 0 for all eligible images.",
+    )
+    parser.add_argument(
+        "-s",
+        "--seed",
+        type=int,
+        default=42,
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=Path("MRI_ADAS11_pairs.csv"),
+    )
+
+    args = parser.parse_args()
+
+    try:
+        mri_table = read_table(
+            args.mri_table,
+            ["subject_id", "image_id", "image_date"],
+        )
+        mayo_table = read_table(
+            args.qc,
+            [
+                "image_id",
+                "SeriesType",
+                "AcquisitionType",
+                "SlicesPerVolume",
+            ],
+        )
+        mayo_table = add_dimensions(mayo_table, args.dimensions_table)
+        clinical_table = read_table(
+            args.clinical,
+            ["PTID", "VISDATE"] + SOURCE_SCORES,
         )
 
-        # Repeated copies of the same label agree. Different labels on
-        # the latest eligible date leave the diagnosis blank for review.
-        if len(latest_labels) == 1:
-            result.update(
-                diagnosis_at_mri=latest_labels[0],
-                diagnosis_status="documented",
-            )
-        else:
-            result["diagnosis_status"] = "conflicting"
+        pairs = match_mri_adas11(
+            mri_table,
+            mayo_table,
+            clinical_table,
+            min_slices=args.min_slices,
+            max_gap_days=args.max_gap_days,
+            n_images=args.n_images,
+            seed=args.seed,
+        )
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
 
-    return pd.DataFrame(output, columns=columns)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    pairs.to_csv(
+        args.output,
+        index=False,
+        date_format="%Y-%m-%d",
+    )
+
+    print(f"\nSaved {len(pairs):,} unique image IDs to {args.output}")
+    print(f"Unique participants: {pairs['subject_id'].nunique():,}")
 
 
 if __name__ == "__main__":
-    # Replace these filenames with your actual exports. Read identifiers
-    # as strings so pandas preserves leading zeros.
-    mri_data = pd.read_csv(
-    "data/tables/All_Subjects_Key_MRI_13Nov2026.csv",
-    dtype="string",
-    )
-    clinical_table = pd.read_csv("data/tables/ADAS.csv", dtype="string").rename(
-        columns={"VISDATE": "EXAMDATE", "TOTSCORE": "ADAS11"}
-    )
-    diagnosis_table = pd.read_csv("data/tables/DXSUM.csv", dtype="string")
-
-    matches = match_adni_adas11(
-        mri_data,
-        clinical_table,
-        diagnosis_table,
-        mri_id_col="image_id",
-        mri_ptid_col="subject_id",
-        mri_date_col="image_date",
-        diagnosis_date_col="EXAMDATE",
-        diagnosis_value_col="DIAGNOSIS",
-        max_gap_days=90,
-    )
-
-    matches.to_csv("MRI_ADAS11_matches.csv", index=False)
-
-    print("MRI matching results:")
-    print(matches["status"].value_counts().to_string())
-
-    print("\nDiagnosis status among matched MRI–ADAS11 pairs:")
-    print(
-        matches.loc[matches["status"] == "matched", "diagnosis_status"]
-        .value_counts()
-        .to_string()
-    )
-
-# Count MRI rows linked to the same ADAS-Cog11 assessment.
-    matched = matches.loc[matches["status"].eq("matched")]
-    scans_per_assessment = matched.groupby(["PTID", "clinical_row"]).size()
-    shared = scans_per_assessment[scans_per_assessment > 1]
-    scans_per_patient = matched.groupby("PTID")["mri_id"].nunique()
-    patients_with_multiple_scans = scans_per_patient.gt(1).sum()
-
-    print(f"\n{len(shared):,} ADAS-Cog11 assessments are linked to multiple MRI scans.")
-    print(f"{patients_with_multiple_scans:,} patients have two or more MRI scans matched to ADAS-Cog11.\n")
+    main()
