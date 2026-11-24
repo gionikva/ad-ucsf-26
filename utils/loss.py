@@ -105,6 +105,6 @@ class MSRCogLoss(nn.Module):
     def forward(self, mask, logits, targets):
         _, _, D, H, W = mask.size()
         mse_loss = F.mse_loss(logits, targets)
-        intensity_loss = torch.sum(mask) / D * H * W
+        intensity_loss = torch.sum(mask) / (D * H * W)
         total_loss = mse_loss + self.w_int * intensity_loss
         return total_loss, mse_loss, intensity_loss
