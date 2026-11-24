@@ -30,7 +30,7 @@ class MSRCog(nn.Module):
         demo_size=14,
         out_size=1,
         mgen_anchors=256,
-        mgen_stage_channels=(8, 16, 32, 64),
+        mgen_stage_channels=(4, 8, 16, 32),
         mgen_downsample=False,
         seg_anchors=8,
         seg_stage_channels=(8, 16, 32, 64),
@@ -133,7 +133,7 @@ class MSRCog(nn.Module):
         demo_size=14,
         out_size=1,
         mgen_anchors=256,
-        mgen_stage_channels=(8, 16, 32, 64),
+        mgen_stage_channels=(4, 8, 16, 32),
         mgen_downsample=False,
     ):
         """
