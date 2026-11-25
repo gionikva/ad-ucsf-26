@@ -18,7 +18,7 @@ Afterward, navigate to `"Downloads" > "Images"` and download the files. Once the
 ## Preprocessing the data
 First, install the dependencies by running `pip install -r requirements.txt`. 
 
-To preoprocess the data, run `python preprocess.py -d 192`. In case the script crashes or is interrupted, you may resume preprocessing with `python preprocess.py -d 192 -r`, though do note this functionality has not been extensively tested so I would use it with caution. In general, you may `python preprocess.py --help` for all available options.
+To preprocess the data, run `python preprocess.py -d 192 --segment`. In case the script crashes or is interrupted, you may resume preprocessing with `python preprocess.py -d 192 -r`, though do note this functionality has not been extensively tested so I would use it with caution. In general, you may `python preprocess.py --help` for all available options.
 
 ## Segmentation pretraining
 To train the (LightMedSeg) backbone on the BM/WM/CSF segmentation pretraining task, run 

@@ -1,3 +1,5 @@
+from monai.data.meta_tensor import MetaTensor
+
 from torch._tensor import Tensor
 from ants.core.ants_image import ANTsImage
 import os
@@ -158,6 +160,7 @@ def preprocess_adni_pipeline(
     out_dir: str,
     output_size: int,
     gpu: bool = False,
+    segment: bool = False,
     target_spacing: tuple = (1.0, 1.0, 1.0),
 ):
     """
@@ -180,25 +183,32 @@ def preprocess_adni_pipeline(
     skull_stripped = ants.image_read(img_path)
 
     n4_corrected = n4_correct(skull_stripped)
-    segmented = ants_atropos(n4_corrected)
-
     image = ants_to_monai(n4_corrected)
-    label = ants_to_monai(segmented)
+    dct: dict[str, MetaTensor] = {"image": image}
+    all_keys = ["image"]
+    spacing_modes = ["bilinear"]
 
-    dct = {"image": image, "label": label}
+    if segment:
+        segmented = ants_atropos(n4_corrected)
+        label = ants_to_monai(segmented)
+        dct["label"] = label     
+        all_keys.append("label")   
+        spacing_modes.append("nearest")
+    
+    
 
     transforms = Compose(
         [
-            EnsureChannelFirstd(keys=["image", "label"], channel_dim="no_channel"),
+            EnsureChannelFirstd(keys=all_keys, channel_dim="no_channel"),
             Spacingd(
-                keys=["image", "label"],
+                keys=all_keys,
                 pixdim=(1.0, 1.0, 1.0),
-                mode=("bilinear", "nearest"),
+                mode=spacing_modes,
             ),
-            Orientationd(keys=["image", "label"], axcodes="RAS", labels=None),
+            Orientationd(keys=all_keys, axcodes="RAS", labels=None),
             NormalizeIntensityd(keys=["image"]),  # Z-score normalization
             ResizeWithPadOrCropd(
-                keys=["image", "label"],
+                keys=all_keys,
                 spatial_size=(output_size, output_size, output_size),
             ),
         ]
@@ -207,7 +217,8 @@ def preprocess_adni_pipeline(
     out = transforms(dct)
 
     img = out["image"]
-    seg = out["label"]
+    if segment:
+        seg = out["label"]
 
     writer = NibabelWriter()
 
@@ -215,9 +226,10 @@ def preprocess_adni_pipeline(
     writer.set_metadata({"affine": img.affine})
     writer.write(img_path)
 
-    writer.set_data_array(seg, channel_dim=0)
-    writer.set_metadata({"affine": seg.affine})
-    writer.write(seg_path)
+    if segment:
+        writer.set_data_array(seg, channel_dim=0)
+        writer.set_metadata({"affine": seg.affine})
+        writer.write(seg_path)
 
     delete_extra_files(out_dir)
     # Remove unneeded files
@@ -285,6 +297,11 @@ def main():
         help="MRI quality control file path.",
         type=str,
         default="./data/tables/MRIQC.csv",
+    )
+    parser.add_argument(
+        "--segment",
+        help="If added, enables WM/GM/CSF segmentation using ANTs antropos.",
+        action="store_true"
     )
     parser.add_argument(
         "-t",
