@@ -28,9 +28,10 @@ class MSRCog(nn.Module):
         self,
         input_size: tuple = (1, 192, 192, 192),
         demo_size=14,
+        demo_film=True,
         out_size=1,
         mgen_anchors=256,
-        mgen_stage_channels=(4, 8, 16, 32),
+        mgen_stage_channels=(8, 8, 16, 32),
         mgen_downsample=False,
         seg_anchors=8,
         seg_stage_channels=(8, 16, 32, 64),
@@ -45,6 +46,8 @@ class MSRCog(nn.Module):
             Output vector size. Set to 2 for cogscore + disagnosis. 1 by default.
         """
         super().__init__()
+
+        self.demo_enabled = demo_film
 
         self._hyperparams = {
             "input_size": input_size,
@@ -90,9 +93,10 @@ class MSRCog(nn.Module):
         # Reduced channel count of bottneleck input into regression head
         rd_channels = bn_channels // 16
 
-        self.demo_film = MetadataFiLM(
-            in_channels=bn_channels, meta_dim=demo_size, hidden_dim=128
-        )
+        if demo_film:
+            self.demo_film = MetadataFiLM(
+                in_channels=bn_channels, meta_dim=demo_size, hidden_dim=128
+            )
 
         # Whether the segmentation backbone donwsampled the input
         # before passing it to the encoder
@@ -131,9 +135,10 @@ class MSRCog(nn.Module):
         device="cpu",
         input_size=(1, 192, 192, 192),
         demo_size=14,
+        demo_film=True,
         out_size=1,
         mgen_anchors=256,
-        mgen_stage_channels=(4, 8, 16, 32),
+        mgen_stage_channels=(8, 8, 16, 32),
         mgen_downsample=False,
     ):
         """
@@ -145,6 +150,7 @@ class MSRCog(nn.Module):
         model = MSRCog(
             input_size=input_size,
             demo_size=demo_size,
+            demo_film=demo_film,
             out_size=out_size,
             mgen_anchors=mgen_anchors,
             mgen_stage_channels=mgen_stage_channels,
@@ -221,7 +227,7 @@ class MSRCog(nn.Module):
 
         fused = self.fuse_bottleneck(e4_out, skip_2, skip_1, target_size=(D, H, W))
 
-        conditioned = self.demo_film(fused, demographics)
+        conditioned = self.demo_film(fused, demographics) if self.demo_enabled else fused
 
         reduced = self.bn_reducer(conditioned)
 
