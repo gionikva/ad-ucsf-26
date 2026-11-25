@@ -23,15 +23,19 @@ def get_image_paths(root: str, range: tuple = None) -> list:
             if "temp.nii.gz" in filenames:
                 continue
 
-            if "img.nii.gz" in filenames and "img_seg.nii.gz" in filenames:
-                ret.append(
-                    {
+            if "img.nii.gz" in filenames:
+                dct = {
                         "mri_path": os.path.join(image.path, "img.nii.gz"),
-                        "seg_path": os.path.join(image.path, "img_seg.nii.gz"),
                         "image_id": int(image.name),
                         "subject_id": subject.name,
                     }
-                )
+                
+                if "img_seg.nii.gz" in filenames:
+                    dct["seg_path"] = os.path.join(image.path, "img_seg.nii.gz")
+                
+                ret.append(dct)
+                
+    ret = sorted(ret, key=lambda d: d["image_id"])
 
     if range is not None:
         ret = ret[range[0] : range[1]]
