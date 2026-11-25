@@ -284,6 +284,11 @@ def main():
         type=Path,
         default=Path("MRI_ADAS11_pairs.csv"),
     )
+    parser.add_argument(
+        "--image-ids-out",
+        help="Optional path for image IDs to paste into ADNI ARC.",
+        default="./misc/images.txt"
+    )
 
     args = parser.parse_args()
 
@@ -317,6 +322,11 @@ def main():
         )
     except (ValueError, OSError) as error:
         parser.error(str(error))
+        
+    if args.image_ids_out is not None:  
+        with open(args.image_ids_out, "w+") as file:
+            file.write(",".join(list(pairs["image_id"])))
+            
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     pairs.to_csv(
