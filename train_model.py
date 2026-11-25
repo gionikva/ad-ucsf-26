@@ -155,6 +155,13 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
+        "-i",
+        "--input",
+        help="Preprocessed images path.",
+        default="./data/images/train"
+    )
+
+    parser.add_argument(
         "-w",
         "--seg-weights",
         help="Trained segmentation backbone weights.",
@@ -207,6 +214,12 @@ def parse_arguments():
         help="Range of cogscores to predict in format start_idx:end_idx.",
         default="0:12",
     )
+    
+    parser.add_argument(
+        "--no-demog",
+        help="Ignore demographic data",
+        action="store_true"
+    )
 
     # parser.add_argument(
     #     "-d",
@@ -229,11 +242,16 @@ def parse_arguments():
         help="Resume training from the last epoch.",
         action="store_true",
     )
-
+    parser.add_argument(
+        "--cpu",
+        help="Run on the cpu.",
+        action="store_true"
+    )
     args = parser.parse_args()
 
     parsed = {}
 
+    parsed["images_path"] = args.input
     parsed["input_size"] = args.input_size
     parsed["output_dir"] = args.output
     parsed["seg_weights"] = args.seg_weights
@@ -253,6 +271,9 @@ def parse_arguments():
     parsed["cogscore_range"] = (
         None if cog_rng == None else [int(idx) for idx in cog_rng.split(":")]
     )
+    parsed["no_demog"] = args.no_demog
+    parsed["cpu"] = args.cpu
+    
 
     return parsed
 
@@ -262,6 +283,7 @@ def main():
 
     args = parse_arguments()
 
+    images_path = args["images_path"]
     input_size = args["input_size"]
     output_dir = args["output_dir"]
     seg_weights = args["seg_weights"]
@@ -274,9 +296,12 @@ def main():
     resume = args["resume"]
     data_range = args["data_range"]
     cogscore_range = args["cogscore_range"]
+    no_demog = args["no_demog"]
+    run_on_cpu = args["cpu"]
 
     dataset = ADNICogDataset(
         split="train",
+        images_path=images_path,
         test_ratio=0.1,
         range=data_range,
         domain_augment=domain_augment,
@@ -301,7 +326,7 @@ def main():
         best_weights_path = os.path.join(output_dir, "best.pth")
 
         checkpoint = torch.load(last_weights_path)
-        model = LightMedSeg.load(last_weights_path)
+        model = MSRCog.load(last_weights_path)
 
         last_epoch = checkpoint["metadata"]["epoch"]
         best_val_loss = torch.load(best_weights_path)["metadata"]["val_loss"]
@@ -312,10 +337,13 @@ def main():
         optimizer_state_dict = None
 
         model = MSRCog.from_seg(
-            path=seg_weights, input_size=input_size, demo_size=14, out_size=1
+            path=seg_weights, input_size=input_size, demo_size=16, demo_film=not no_demog, out_size=1
         )
 
-    device: Literal["cuda", "cpu"] = "cuda" if torch.cuda.is_available() else "cpu"
+    if run_on_cpu:
+        device = "cpu"
+    else:
+        device: Literal["cuda", "cpu"] = "cuda" if torch.cuda.is_available() else "cpu"
 
     os.makedirs(output_dir, exist_ok=True)
 
