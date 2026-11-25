@@ -4,6 +4,11 @@ import pandas as pd
 import numpy as np
 
 
+"""
+    Generates image ids with more than min_slices slices for segmentation pretraining.
+"""
+
+
 def list_usable_dcm_dirs(mriqc_csv: str, min_slices=20) -> pd.Series:
     df_qc = pd.read_csv(mriqc_csv, low_memory=False)
 
